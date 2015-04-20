@@ -1,8 +1,20 @@
-include_directories(../client_lib ../lib ../meta_server)
-set(DSN_EXTRA_LIBS
-	dsn.replication.meta_server
-	dsn.replication
-	dsn.replication.clientlib
-	)
-set(BINPLACE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/metaserver.ini")
-dsn_add_executable(dsn.replication.all "${BINPLACE_FILES}") 
+cmake_minimum_required(VERSION 2.8.8)
+
+set(DSN_ROOT "E:/rdsn")
+if(NOT EXISTS "${DSN_ROOT}/")
+	message(FATAL_ERROR "Please make sure that ${DSN_ROOT} exists.")
+endif()
+
+include("${DSN_ROOT}/bin/dsn.cmake")
+
+set(DSN_APP_TARGET "simple_kv")
+project(${DSN_APP_TARGET} C CXX)
+set(DSN_BUILD_RUNTIME 0)
+set(DSN_EXTRA_BOOST_PACKAGES "")
+set(DSN_EXTRA_INCLUDEDIR "")
+set(DSN_EXTRA_LIBRARYDIR "")
+set(DSN_EXTRA_LIBS dsn.replication dsn.replication.meta_server dsn.replication.clientlib dsn.failure_detector)
+set(DSN_EXTRA_SRC "")
+dsn_common_setup()
+file(GLOB BINPLACE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/*.ini")
+dsn_add_executable(${DSN_APP_TARGET} "${BINPLACE_FILES}")
