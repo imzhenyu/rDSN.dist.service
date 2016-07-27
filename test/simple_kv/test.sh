@@ -30,7 +30,7 @@ function run_case()
 
     if [ -d case-${id} ]; then
         cd case-${id}
-        ./run.sh
+        ./test.sh
         if [ $? -ne 0 ]; then
             exit -1
         fi
@@ -39,14 +39,14 @@ function run_case()
     fi
 
     if [ -f case-${id}.act ]; then
-        ./clear.sh
+        rm -rf data core*
         run_single case-${id}
         return
     fi
 
     subcases=`ls case-${id}-[0-9].act 2>/dev/null | sed -n 's/^case-[0-9][0-9][0-9]-\([0-9]\).act$/\1/p' | sort -u`
     if [ ! -z "${subcases}" ]; then
-        ./clear.sh
+        rm -rf data core*
         for subid in ${subcases}; do
             run_single case-${id}-${subid}
         done
