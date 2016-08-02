@@ -9,7 +9,7 @@ else()
     include("${DSN_ROOT}/bin/dsn.cmake")
 endif()
 
-set(MY_PROJ_NAME dsn.rep_tests.simple_kv)
+set(MY_PROJ_NAME dsn.dist.service.test.simple_kv)
 # add_definitions(-DDSN_IN_CORE)
 # set(DSN_IN_CORE "TRUE")
 
@@ -22,17 +22,17 @@ set(MY_PROJ_SRC "")
 # "GLOB" for non-recursive search
 set(MY_SRC_SEARCH_MODE "GLOB")
 
-set(MY_PROJ_INC_PATH ../../client_lib)
+set(MY_PROJ_INC_PATH ../../common)
 
 set(MY_BOOST_PACKAGES system)
 
 set(MY_PROJ_LIBS gtest
-                 dsn.replication
-                 dsn.replication.meta_server
-                 dsn.replication.clientlib
-                 dsn.failure_detector.multimaster
-                 dsn.failure_detector
-                 dsn.replication.zookeeper_provider
+                 dsn.dist.service.replication_lib
+                 dsn.dist.service.meta_server_lib
+                 dsn.dist.service.common
+                 dsn.dist.service.fd.multimaster
+                 dsn.dist.service.fd
+                 dsn.dist.service.zookeeper_provider
                  zookeeper_mt
                  dsn.dev.utility
 )

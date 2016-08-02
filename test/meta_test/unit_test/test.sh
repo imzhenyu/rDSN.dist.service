@@ -5,6 +5,6 @@ if [ -z "${REPORT_DIR}" ]; then
 fi
 
 rm -rf core data/ meta_state.dump* zoolog.log 
-output_xml="${REPORT_DIR}/dsn.meta.test.xml"
-GTEST_OUTPUT="xml:${output_xml}" ./dsn.meta.test
+output_xml="${REPORT_DIR}/dsn.dist.service.meta.test.xml"
+GTEST_OUTPUT="xml:${output_xml}" ./dsn.dist.service.meta.test
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-bin=./dsn.rep_tests.simple_kv
+bin=./dsn.dist.service.test.simple_kv
 
 function run_single()
 {

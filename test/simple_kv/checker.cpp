@@ -37,16 +37,14 @@
 # include "case.h"
 # include "dsn/utility/factory_store.h"
 
-# include "../../lib/replica.h"
-# include "../../lib/replica_stub.h"
-# include "../../lib/mutation_log.h"
-# include "../../meta_server/meta_service.h"
-# include "../../meta_server/meta_server_failure_detector.h"
-# include "../../meta_server/server_state.h"
-# include "../../meta_server/server_load_balancer.h"
-# include "../../client_lib/replication_ds.h"
-//# include "../../../../core/core/service_engine.h"
-//# include "../../../../core/core/rpc_engine.h"
+# include "../../replica_server/replication_lib/replica.h"
+# include "../../replica_server/replication_lib/replica_stub.h"
+# include "../../replica_server/replication_lib/mutation_log.h"
+# include "../../meta_server/meta_server_lib/meta_service.h"
+# include "../../meta_server/meta_server_lib/meta_server_failure_detector.h"
+# include "../../meta_server/meta_server_lib/server_state.h"
+# include "../../meta_server/meta_server_lib/server_load_balancer.h"
+# include "../../common/replication_ds.h"
 
 # include <sstream>
 # include <boost/lexical_cast.hpp>

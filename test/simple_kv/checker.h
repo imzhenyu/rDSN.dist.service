@@ -39,7 +39,7 @@
 
 # include <dsn/utility/singleton.h>
 # include <dsn/tool-api/global_checker.h>
-# include "../../meta_server/server_state.h"
+# include "../../meta_server/meta_server_lib/server_state.h"
 # include <dsn/dist/replication/meta_service_app.h>
 # include <dsn/dist/replication/replication_service_app.h>
 

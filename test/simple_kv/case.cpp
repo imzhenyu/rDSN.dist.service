@@ -39,8 +39,8 @@
 
 # include <dsn/tool-api/task.h>
 # include <dsn/tool-api/rpc_message.h>
-# include "../../meta_server/server_load_balancer.h"
-# include "../../lib/replica_stub.h"
+# include "../../meta_server/meta_server_lib/server_load_balancer.h"
+# include "../../replica_server/replication_lib/replica_stub.h"
 
 # include <iostream>
 # include <string>
