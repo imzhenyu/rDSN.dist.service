@@ -102,7 +102,7 @@ void migration_check_and_apply(app_mapper& apps, node_mapper& nodes, migration_l
         for (unsigned int j=0; j<proposal->action_list.size(); ++j) {
             ++pc.ballot;
             configuration_proposal_action& act = proposal->action_list[j];
-            dinfo("the %dth round of action, type: %s, node: %s, target: %s", j, dsn::enum_to_string(act.type), act.node.to_string(), act.target.to_string());
+            dinfo("the %dth round of action, type: %s, node: %s, target: %s", j, enum_to_string(act.type), act.node.to_string(), act.target.to_string());
             ASSERT_TRUE(act.type!=config_type::CT_INVALID);
             ASSERT_FALSE(act.target.is_invalid());
             ASSERT_FALSE(act.node.is_invalid());

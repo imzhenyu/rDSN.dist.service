@@ -28,10 +28,10 @@ set(MY_PROJ_INC_PATH ../../common ../../fd/failure_detector ../meta_server_lib)
 set(MY_PROJ_LIBS
     dsn.dist.service.common
     dsn.dist.service.fd
-	dsn.dist.service.fd.multimaster
+    dsn.dist.service.fd.multimaster
     dsn.dist.service.zookeeper_provider
     zookeeper_mt
-	gtest
+    gtest
     )
 
 set(MY_PROJ_LIB_PATH "")

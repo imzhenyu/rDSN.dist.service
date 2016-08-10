@@ -43,7 +43,6 @@ using namespace ::dsn::service;
 
 namespace dsn { namespace replication {
 
-
 typedef std::unordered_map< ::dsn::rpc_address, partition_status::type> node_statuses;
 typedef std::unordered_map< ::dsn::rpc_address, dsn::task_ptr> node_tasks;
 
@@ -110,21 +109,15 @@ private:
     void sanity_check();
 };
 
+ENUM_TYPE_SERIALIZATION(partition_status::type, partition_status::PS_INVALID)
+
+inline void json_encode(std::stringstream& out, const node_state& ns)
+{
+    JSON_ENCODE_ENTRIES(out, ns, is_alive, address, primaries, partitions);
+}
+inline void json_decode(dsn::json::string_tokenizer& in, node_state& ns)
+{
+    JSON_DECODE_ENTRIES(in, ns, is_alive, address, primaries, partitions);
+}
 
 }} // namespace
-
-namespace dsn {
-namespace json {
-
-ENUM_TYPE_SERIALIZATION(dsn::replication::partition_status::type, dsn::replication::partition_status::PS_INVALID)
-
-inline void json_encode(std::stringstream& out, const dsn::replication::node_state& ns)
-{
-	JSON_ENCODE_ENTRIES(out, ns, is_alive, address, primaries, partitions);
-}
-inline void json_decode(dsn::json::string_tokenizer& in, dsn::replication::node_state& ns)
-{
-	JSON_DECODE_ENTRIES(in, ns, is_alive, address, primaries, partitions);
-}
-
-} }

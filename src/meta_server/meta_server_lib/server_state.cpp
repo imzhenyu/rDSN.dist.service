@@ -892,7 +892,7 @@ void server_state::list_apps(const configuration_list_apps_request& request, con
 void server_state::send_proposal(rpc_address target, const configuration_update_request &proposal)
 {
     ddebug("send proposal %s of %s, gpid(%d.%d), current ballot = %" PRId64,
-        ::dsn::enum_to_string(proposal.type),
+        enum_to_string(proposal.type),
         proposal.node.to_string(),
         proposal.config.pid.get_app_id(),
         proposal.config.pid.get_partition_index(),

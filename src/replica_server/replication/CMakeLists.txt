@@ -29,7 +29,7 @@ set(MY_PROJ_LIBS
     dsn.dist.service.common
     dsn.dist.service.fd
     dsn.dist.service.fd.multimaster
-	gtest
+    gtest
     )
 
 set(MY_PROJ_LIB_PATH "")
