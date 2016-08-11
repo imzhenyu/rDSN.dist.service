@@ -30,9 +30,7 @@ before_script:
     - ./run.sh start_zk
     - ulimit -c unlimited -S
     - popd
-
-script:
-    - export DSN_ROOT=`pwd`/main    
+    - export DSN_ROOT=`pwd`/main/builder/output
     - export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$DSN_ROOT/lib
     - pushd main
     - ./run.sh build
@@ -40,16 +38,13 @@ script:
     - mkdir build
     - pushd build
     - cmake ..
-    - make -j
+    - make -j 4
     - cp -fr * ../main/builder
     - popd    
+
+script:   
     - pushd main
     - ./run.sh test
-    - popd
-
-after_script:
-    - pushd main
-    - ./run.sh stop_zk
     - popd
 
 notifications:
