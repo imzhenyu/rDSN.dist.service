@@ -1,0 +1,34 @@
+version: 1.0.{build}
+
+before_build:
+    - cmd: >-        
+        git clone https://github.com/Microsoft/rDSN.git main
+        
+        cd main 
+        
+        SET DSN_AUTO_TEST=1
+        
+        run.cmd setup-env
+        
+        run.cmd build Debug .\build
+        
+        run.cmd install Debug .\build
+        
+        cd ..
+        
+build_script:
+    - cmd: >-
+        del .\main\build\CMakeCache.txt
+        
+        main\run.cmd build Debug .\main\build
+        
+test_script:
+    - cmd: >-
+        cd main 
+        
+        run.cmd test Debug .\build
+        
+        cd ..
+        
+        exit 0
+
