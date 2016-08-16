@@ -18,17 +18,20 @@ before_build:
         
 build_script:
     - cmd: >-
-        del .\main\build\CMakeCache.txt
+        main\run.cmd build Debug .\build
         
-        main\run.cmd build Debug .\main\build
+        main\run.cmd install Debug .\build
+        
+        xcopy /Y /S .\build\* .\main\build\
         
 test_script:
     - cmd: >-
         cd main 
         
+        run.cmd start_zk 
+        
         run.cmd test Debug .\build
         
         cd ..
         
-        exit 0
 

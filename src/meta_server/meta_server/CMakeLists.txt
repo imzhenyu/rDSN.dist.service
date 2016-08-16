@@ -41,4 +41,6 @@ set(MY_BINPLACES "")
 
 dsn_add_shared_library()
 
-file(COPY test/ DESTINATION "${CMAKE_BINARY_DIR}/test/${MY_PROJ_NAME}")
+if(NOT WIN32)
+    file(COPY test/ DESTINATION "${CMAKE_BINARY_DIR}/test/${MY_PROJ_NAME}")
+endif()
