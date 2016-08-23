@@ -18,20 +18,16 @@ before_build:
         
 build_script:
     - cmd: >-
-        main\run.cmd build Debug .\build
+        echo DSN_ROOT=%DSN_ROOT%
         
-        main\run.cmd install Debug .\build
+        dsn.run.cmd build Debug .\build
         
-        xcopy /Y /S .\build\* .\main\build\
+        dsn.run.cmd install Debug .\build
         
 test_script:
     - cmd: >-
-        cd main 
+        echo DSN_ROOT=%DSN_ROOT%
         
-        run.cmd start_zk 
-        
-        run.cmd test Debug .\build
-        
-        cd ..
-        
+        dsn.run.cmd test Debug .\build
+
 

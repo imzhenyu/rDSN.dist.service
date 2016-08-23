@@ -24,28 +24,24 @@ before_install:
 
 install:
     - git clone https://github.com/Microsoft/rDSN.git main
-
-before_script:
-    - pushd main
-    - ./run.sh start_zk
-    - ulimit -c unlimited -S
-    - popd
     - export DSN_ROOT=`pwd`/main/builder/output
     - export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$DSN_ROOT/lib
+    - export PATH=$DSN_ROOT/bin:$PATH
     - pushd main
     - ./run.sh build
+    - ./run.sh install
     - popd
-    - mkdir build
-    - pushd build
-    - cmake ..
-    - make -j 4
-    - cp -fr * ../main/builder
-    - popd    
 
-script:   
-    - pushd main
-    - ./run.sh test
-    - popd
+before_script:
+    - echo DSN_ROOT=$DSN_ROOT
+    - dsn.run.sh build
+    - dsn.run.sh install
+
+script:
+    - echo DSN_ROOT=$DSN_ROOT
+    - ulimit -c unlimited -S
+    - dsn.run.sh start_zk
+    - dsn.run.sh test
 
 notifications:
   email: false

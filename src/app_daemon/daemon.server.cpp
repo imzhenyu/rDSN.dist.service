@@ -37,22 +37,45 @@
 # include "daemon.server.h"
 # include "daemon.h"
 # include <dsn/cpp/utils.h>
+# include <dsn/tool_api.h>
 # include <dsn/utility/module_init.cpp.h>
- 
+
+# if defined(__linux__)
+# include <sys/prctl.h>
+# endif
+
 using namespace ::dsn::replication;
+extern void daemon_register_test_server();
 
 MODULE_INIT_BEGIN(daemon)
     dsn::register_app< ::dsn::dist::daemon>("daemon");
+    daemon_register_test_server();
 MODULE_INIT_END
 
 namespace dsn
 {
     namespace dist
     {
+# if defined(__linux__)
+        static daemon_s_service* s_single_daemon = nullptr;
+        void daemon_s_service::on_exit(::dsn::sys_exit_type st)
+        {
+            int pid = getpid();
+            kill(-pid, SIGTERM);
+            sleep(2);
+            kill(-pid, SIGKILL);
+        }
+# endif
+
         daemon_s_service::daemon_s_service() 
             : ::dsn::serverlet<daemon_s_service>("daemon_s"), _online(false)
         {
-            _under_deployment = false;
+# if defined(__linux__)
+            s_single_daemon = this;
+            ::dsn::tools::sys_exit.put_back(daemon_s_service::on_exit, "daemon.exit");
+            setpgid(0, 0);
+# endif
+
             _working_dir = utils::filesystem::path_combine(dsn_get_app_data_dir(), "apps");
             _package_server = rpc_address(
                 dsn_config_get_value_string("apps.daemon", "package_server_host", "", "the host name of the app store where to download package"),
@@ -62,6 +85,22 @@ namespace dsn
             _app_port_min = (uint32_t)dsn_config_get_value_uint64("apps.daemon", "app_port_min", 59001, "the minimum port that can be assigned to app");
             _app_port_max = (uint32_t)dsn_config_get_value_uint64("apps.daemon", "app_port_max", 60001, "the maximum port that can be assigned to app");
             _config_sync_interval_seconds = (uint32_t)dsn_config_get_value_uint64("apps.daemon", "config_sync_interval_seconds", 30, "sync configuration with meta server for every how many seconds");
+
+# ifdef _WIN32
+            _unzip_format_string = dsn_config_get_value_string(
+                "apps.daemon", 
+                "unzip_format_string", 
+                "unzip -qo %s.zip -d %s", 
+                "unzip cmd used as fprintf(fmt-str, src-package-name, dst-dir)"
+            );
+# else
+            _unzip_format_string = dsn_config_get_value_string(
+                "apps.daemon",
+                "unzip_format_string",
+                "tar zxvf %s.tar.gz -C %s",
+                "unzip cmd used as fprintf(fmt-str, src-package-name, dst-dir)"
+            );
+# endif
 
             if (!utils::filesystem::directory_exists(_working_dir))
             {
@@ -139,7 +178,7 @@ namespace dsn
                 LPC_DAEMON_APPS_CHECK_TIMER,
                 this,
                 [this]{ this->check_apps(); },
-                std::chrono::milliseconds(30)
+                std::chrono::milliseconds(500)
                 );
 
 
@@ -219,11 +258,18 @@ namespace dsn
                 if (resp.err != ERR_OK)
                     return;
 
-                apps sapps;
+                std::unordered_map<dsn::gpid, std::shared_ptr< app_internal> > apps;
+
+                _lock.lock_read();
+                for (auto& pkg : _apps)
                 {
-                    ::dsn::service::zauto_read_lock l(_lock);
-                    sapps = _apps;
+                    for (auto& app : pkg.second->apps)
+                    {
+                        apps.emplace(app.second->configuration.pid, app.second);
+                    }
                 }
+                _lock.unlock_read();
+
                 
                 // find apps on meta server but not on local daemon
                 rpc_address host = primary_address();
@@ -245,8 +291,15 @@ namespace dsn
                         host.to_string(), appc.config.pid.get_app_id(), appc.config.pid.get_partition_index()
                         );
 
-                    auto it = sapps.find(appc.config.pid);
-                    if (it == sapps.end())
+                    bool found = false;
+                    auto it = apps.find(appc.config.pid);
+                    if (it != apps.end())
+                    {
+                        found = true;
+                        apps.erase(it);
+                    }
+
+                    if (!found)
                     {
                         configuration_update_request req;
                         req.info = appc.info;
@@ -263,17 +316,16 @@ namespace dsn
 
                         update_configuration_on_meta_server(config_type::CT_REMOVE, std::move(app));
                     }
-                    else
-                    {
-                        // matched on daemon and meta server
-                        sapps.erase(it);
-                    }
                 }
 
                 // find apps on local daemon but not on meta server
-                for (auto app : sapps)
+                for (auto& app : apps)
                 {
-                    kill_app(std::move(app.second));
+                    auto cap = app.second;
+
+                    // check for 3 times and the app does not exit on meta
+                    if (++cap->not_exist_on_meta_count > 3)
+                        kill_app(std::move(cap));
                 }
             }
         }
@@ -289,9 +341,15 @@ namespace dsn
                 std::shared_ptr<app_internal> app = nullptr;
                 {
                     ::dsn::service::zauto_write_lock l(_lock);
-                    auto it = _apps.find(gpid);
-                    if (it != _apps.end())
-                        app = it->second;
+                    for (auto& pkg : _apps)
+                    {
+                        auto it = pkg.second->apps.find(gpid);
+                        if (it != pkg.second->apps.end())
+                        {
+                            app = it->second;
+                            break;
+                        }
+                    }
                 }
 
                 if (app == nullptr)
@@ -351,70 +409,96 @@ namespace dsn
 
         void daemon_s_service::on_add_app(const ::dsn::replication::configuration_update_request & proposal)
         {
-            bool underd = false;
-            if (!_under_deployment.compare_exchange_strong(underd, true))
-            {
-                return;
-            }
-
-            // check app exists or not
+            std::shared_ptr<package_internal> ppackage;
             std::shared_ptr<app_internal> old_app, app;
+            bool resource_ready = false;
+            bool is_resource_downloading = false;
 
             {
                 ::dsn::service::zauto_write_lock l(_lock);
-                auto it = _apps.find(proposal.config.pid);
 
-                // app is running with the same package
-                if (it != _apps.end())
+                // check package exists or not
                 {
-                    // proposal's package is older or the same
-                    // ballot is the package version for stateless applications
-                    if (proposal.config.ballot <= it->second->configuration.ballot)
-                        return;
+                    auto it = _apps.find(proposal.info.app_type);
+
+                    // app is running with the same package
+                    if (it != _apps.end())
+                    {
+                        ppackage = it->second;
+                    }
                     else
                     {
-                        old_app = std::move(it->second);
-                        _apps.erase(it);
+                        ppackage.reset(new package_internal(proposal.info.app_type));
+                        ppackage->package_dir = utils::filesystem::path_combine(_working_dir, proposal.info.app_type);
+# ifdef _WIN32
+                        const char* runner = "run.ps1";
+# else
+                        const char* runner = "run.sh";
+# endif
+
+                        // as package-dir/run.ps1,run.sh
+                        ppackage->runner_script = utils::filesystem::path_combine(ppackage->package_dir, runner);
+
+                        _apps.emplace(proposal.info.app_type, ppackage);
                     }
                 }
 
-                app.reset(new app_internal(proposal));
+                // check app exists or not
+                {
+                    resource_ready = ppackage->resource_ready;
+                    is_resource_downloading = ppackage->downloading;
+                    if (!is_resource_downloading)
+                        ppackage->downloading = true; // done later in this call
 
-                // package dir as work-dir/package-id
-                app->package_dir = utils::filesystem::path_combine(_working_dir, proposal.info.app_type);
+                    auto it = ppackage->apps.find(proposal.config.pid);
 
+                    // app is running with the same package
+                    if (it != ppackage->apps.end())
+                    {
+                        // proposal's package is older or the same
+                        // ballot is the package version for stateless applications
+                        if (proposal.config.ballot <= it->second->configuration.ballot)
+                            return;
 
-# ifdef _WIN32
-                const char* runner = "run.cmd";
-# elif defined(__linux__)
-                const char* runner = "run.sh";
-# else
-//# error "not supported yet"
-# endif
+                        else
+                        {
+                            old_app = std::move(it->second);
+                            it->second.reset(new app_internal(proposal));
+                            app = it->second;
+                        }
+                    }
+                    else
+                    {
+                        app.reset(new app_internal(proposal));
+                        ppackage->apps.emplace(proposal.config.pid, app);
+                    }
 
-                // as work-dir/package-id/run.cmd
-                app->runner_script = utils::filesystem::path_combine(app->package_dir, runner);
-
-                _apps.emplace(app->configuration.pid, app);
+                    app->package_dir = ppackage->package_dir;
+                    app->runner_script = ppackage->runner_script;
+                }
             }
-            
-            // TODO: add confliction with the same package
-            
+                
             // kill old app if necessary
             if (nullptr != old_app)
+            {
                 kill_app(std::move(old_app));
+            }
             
             // check and start
-            if (app->resource_ready)
+            if (resource_ready)
             {                
                 start_app(std::move(app));
             }
 
             // download package first if necesary
-            else
+            else if (!is_resource_downloading)
             {
                 // TODO: better way to download package from app store 
-                std::vector<std::string> files{ proposal.info.app_type + ".7z" };
+# ifdef _WIN32
+                std::vector<std::string> files{ proposal.info.app_type + ".zip" };
+# else
+                std::vector<std::string> files{ proposal.info.app_type + ".tar.gz" };
+# endif
 
                 dinfo("start downloading package %s from %s to %s",
                     proposal.info.app_type.c_str(),
@@ -430,47 +514,86 @@ namespace dsn
                     true,
                     LPC_DAEMON_DOWNLOAD_PACKAGE,
                     this,
-                    [this, cap_app = std::move(app)](error_code err, size_t sz) mutable
+                    [this, pkg = std::move(ppackage)](error_code err, size_t sz) mutable
                     {
                         if (err == ERR_OK)
                         {
-
                             // TODO: using zip lib instead
-                            // 
-                            std::string command = "7z x " + _working_dir + '/' + cap_app->app_type + ".7z -y -o" + _working_dir;
+                            char command[1024];
+                            snprintf_p(command, sizeof(command), 
+                                _unzip_format_string.c_str(),
+                                (_working_dir + '/' + pkg->app_type).c_str(),
+                                _working_dir.c_str()
+                                );
+                            
                             // decompress when completed
-                            system(command.c_str());
-
-                            if (utils::filesystem::file_exists(cap_app->runner_script))
+                            int serr = system(command);
+                            if (serr != 0)
                             {
-                                cap_app->resource_ready = true;
-                                start_app(std::move(cap_app));
-                                _under_deployment = false;
-                                return;
+                                derror("extract package %s with cmd '%s' failed, err = %d",
+                                    pkg->package_dir.c_str(),
+                                    command,
+                                    serr
+                                );
+
+                                err = ERR_UNKNOWN;
+
+                                utils::filesystem::remove_path(pkg->package_dir);
+                                {
+                                    ::dsn::service::zauto_write_lock l(_lock);
+                                    _apps.erase(pkg->app_type);
+                                }
                             }
                             else
                             {
-                                derror("package %s does not contain runner '%s' in it",
-                                    cap_app->package_dir.c_str(),
-                                    cap_app->runner_script.c_str()
+                                if (utils::filesystem::file_exists(pkg->runner_script))
+                                {
+                                    same_package_apps apps;
+                                    {
+                                        ::dsn::service::zauto_write_lock l(_lock);
+                                        apps = pkg->apps;
+                                        pkg->resource_ready = true;
+                                        pkg->downloading = false;
+                                    }
+
+                                    for (auto& app : apps)
+                                    {
+                                        start_app(std::move(app.second));
+                                    }
+                                }
+                                else
+                                {
+                                    derror("package %s does not contain runner '%s' in it",
+                                        pkg->package_dir.c_str(),
+                                        pkg->runner_script.c_str()
                                     );
 
-                                err = ERR_OBJECT_NOT_FOUND;
+                                    err = ERR_OBJECT_NOT_FOUND;
+
+                                    utils::filesystem::remove_path(pkg->package_dir);
+                                    {
+                                        ::dsn::service::zauto_write_lock l(_lock);
+                                        _apps.erase(pkg->app_type);
+                                    }
+                                }
                             }
                         }
-
-                        derror("add app %s failed, err = %s ...",
-                            cap_app->app_type.c_str(),
-                            err.to_string()
-                        );
-
-                        utils::filesystem::remove_path(cap_app->package_dir);
+                        else
                         {
-                            ::dsn::service::zauto_write_lock l(_lock);
-                            _apps.erase(cap_app->configuration.pid);
+
+                            derror("download app %s failed, err = %s ...",
+                                pkg->app_type.c_str(),
+                                err.to_string()
+                            );
+
+                            utils::filesystem::remove_path(pkg->package_dir);
+                            {
+                                ::dsn::service::zauto_write_lock l(_lock);
+
+                                // TODO: try multiple times for timeouts
+                                _apps.erase(pkg->app_type);
+                            }
                         }
-                        _under_deployment = false;
-                        return;
                     }
                     );
             }
@@ -483,19 +606,28 @@ namespace dsn
 
             {
                 ::dsn::service::zauto_read_lock l(_lock);
-                auto it = _apps.find(proposal.config.pid);
+                auto it = _apps.find(proposal.info.app_type);
 
                 // app is running with the same package
                 if (it != _apps.end())
                 {
-                    // proposal's package is older or the same
-                    // ballot is the package version for stateless applications
-                    if (proposal.config.ballot <= it->second->configuration.ballot)
-                        return;
-                    else
+                    auto it2 = it->second->apps.find(proposal.config.pid);
+
+                    if (it2 != it->second->apps.end())
                     {
-                        app = std::move(it->second);
-                        _apps.erase(it);
+                        // proposal's package is older or the same
+                        // ballot is the package version for stateless applications
+                        if (proposal.config.ballot <= it2->second->configuration.ballot)
+                            return;
+                        else
+                        {
+                            app = std::move(it2->second);
+                            it->second->apps.erase(it2);
+                            if (it->second->apps.empty())
+                            {
+                                _apps.erase(proposal.info.app_type);
+                            }
+                        }
                     }
                 }
             }
@@ -511,6 +643,8 @@ namespace dsn
 
         void daemon_s_service::start_app(std::shared_ptr<app_internal> && app)
         {
+            dassert(nullptr == app->process_handle, "app handle must be empty at this point");
+
             // set port and run
             for (int i = 0; i < 10; i++)
             {
@@ -530,11 +664,9 @@ namespace dsn
 
                 std::stringstream ss;
 # ifdef _WIN32
-                ss << "cmd.exe /k SET port=" << port;
-                ss << " && SET package_dir=" << app->package_dir;
-                ss << "&& CALL " << app->runner_script;
+                ss << "powershell -Command \"" << app->runner_script << " " << port << "\"";
 # else
-//# error not implemented
+                ss << "cd " << app->working_dir << " && " << app->runner_script << " " << port;
 # endif
                 std::string command = ss.str();
 
@@ -562,8 +694,7 @@ namespace dsn
                         // dassert(false, "cannot attach process to job, err = %d", ::GetLastError());
                     }
 
-                    CloseHandle(pi.hThread);
-                    app->process_handle = pi.hProcess;
+                    CloseHandle(pi.hThread);                    
                 }
                 else
                 {
@@ -573,8 +704,9 @@ namespace dsn
                 }
 
                 // sleep a while to see whether the port is usable
-                if (WAIT_TIMEOUT == ::WaitForSingleObject(app->process_handle, 50))
+                if (WAIT_TIMEOUT == ::WaitForSingleObject(pi.hProcess, 50))
                 {
+                    app->process_handle = pi.hProcess;
                     break;
                 }
                 else
@@ -582,12 +714,40 @@ namespace dsn
                     ::CloseHandle(pi.hProcess);
                 }
 # else
-//# error not implemented
+                int child = fork();
+                if (-1 == child)
+                    break;
+
+                // child process
+                else if (child == 0)
+                {
+                    // run command
+                    char* const argv[] = { (char*)"sh", (char*)"-c", (char*)command.c_str(), nullptr };
+                    execve("/bin/sh", argv, environ);
+                    exit(0);
+                }
+                
+                // daemon
+                // wait for a while
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+                // see if the process is still there
+                if (getpgid(child) >= 0)
+                {
+                    app->process_handle = (dsn_handle_t)(uint64_t)child;
+                    break;
+                }
+
+                // not exsit, try again
+                else
+                {
+                    continue;
+                }
 # endif
             }
 
             // register to meta server if successful
-            if (!app->exited)
+            if (!app->exited && app->process_handle)
             {
                 update_configuration_on_meta_server(config_type::CT_ADD_SECONDARY, std::move(app));
             }
@@ -609,7 +769,13 @@ namespace dsn
 
             {
                 ::dsn::service::zauto_write_lock l(_lock);
-                _apps.erase(app->configuration.pid);
+                auto it = _apps.find(app->app_type);
+                if (it != _apps.end())
+                {
+                    it->second->apps.erase(app->configuration.pid);
+                    if (it->second->apps.empty())
+                        _apps.erase(it);
+                }
             }
 
             if (!app->exited && app->process_handle)
@@ -617,13 +783,13 @@ namespace dsn
 # ifdef _WIN32
                 std::ostringstream pid;
                 std::string command;
-                pid << GetProcessId(app->process_handle);
-                command = "TASKKILL /F /T /PID " + pid.str();
-                system(command.c_str());
+                ::TerminateProcess(app->process_handle, 0);
                 ::CloseHandle(app->process_handle);
                 app->process_handle = nullptr;
 # else
-//# error not implemented
+                int child = (int)(uint64_t)app->process_handle;
+                kill(child, SIGKILL);
+                app->process_handle = nullptr;
 # endif
                 app->exited = true;
             }
@@ -633,42 +799,68 @@ namespace dsn
         
         void daemon_s_service::check_apps()
         {
+            std::vector< std::shared_ptr< app_internal> > apps, delete_list;
+
             _lock.lock_read();
-            auto apps = _apps;
-            _lock.unlock_read();
-
-            for (auto& app : apps)
+            for (auto& pkg : _apps)
             {
-                if (app.second->process_handle)
+                for (auto& app : pkg.second->apps)
                 {
-# ifdef _WIN32
-                    if (WAIT_OBJECT_0 == ::WaitForSingleObject(app.second->process_handle, 0))
-                    {
-                        app.second->exited = true;
-                        DWORD exit_code = 0xdeadbeef;
-                        ::GetExitCodeProcess(app.second->process_handle, &exit_code);
-                        ::CloseHandle(app.second->process_handle);
-                        app.second->process_handle = nullptr;
-
-                        dinfo("app %s exits (code = %x), with working dir = %s, port = %d",
-                            app.second->app_type.c_str(),
-                            exit_code,
-                            app.second->working_dir.c_str(),
-                            (int)app.second->working_port
-                            );
-                    }
-# else
-
-# endif
-                }
-                if (app.second->exited)
-                {
-                    auto cap_app = app.second;
-                    kill_app(std::move(cap_app));
-                    update_configuration_on_meta_server(config_type::CT_REMOVE, std::move(app.second));
+                    apps.push_back(app.second);
                 }
             }
-            apps.clear();
+            _lock.unlock_read();
+            
+            for (auto& app : apps)
+            {
+                if (app->process_handle)
+                {
+# ifdef _WIN32
+                    if (WAIT_OBJECT_0 == ::WaitForSingleObject(app->process_handle, 0))
+                    {
+                        app->exited = true;
+                        DWORD exit_code = 0xdeadbeef;
+                        ::GetExitCodeProcess(app->process_handle, &exit_code);
+                        ::CloseHandle(app->process_handle);
+                        app->process_handle = nullptr;
+
+                        dinfo("app %s exits (code = %x), with working dir = %s, port = %d",
+                            app->app_type.c_str(),
+                            exit_code,
+                            app->working_dir.c_str(),
+                            (int)app->working_port
+                        );
+                    }
+# else
+                    int child = (int)(uint64_t)app->process_handle;
+                    
+                    // see if the process is not there
+                    if (getpgid(child) < 0)
+                    {
+                        app->exited = true;
+                        app->process_handle = nullptr;
+
+                        dinfo("app %s exits, with working dir = %s, port = %d",
+                            app->app_type.c_str(),
+                            app->working_dir.c_str(),
+                            (int)app->working_port
+                            );
+                    }
+# endif
+                }
+
+                if (app->exited)
+                {
+                    delete_list.push_back(app);
+                }
+            }
+
+            for (auto& app : delete_list)
+            {
+                auto cap_app = app;
+                kill_app(std::move(cap_app));
+                update_configuration_on_meta_server(config_type::CT_REMOVE, std::move(app));
+            }
         }
         
         void daemon_s_service::update_configuration_on_meta_server(::dsn::replication::config_type::type type, std::shared_ptr<app_internal>&& app)
