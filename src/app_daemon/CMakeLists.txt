@@ -37,3 +37,11 @@ set(MY_BOOST_PACKAGES "")
 
 dsn_add_shared_library()
 
+if(NOT ("$ENV{APPVEYOR}" STREQUAL ""))
+    message(STATUS "APPVEYOR = $ENV{APPVEYOR}, skip unit test for ${MY_PROJ_NAME}")
+else()
+    file(COPY test/ DESTINATION "${CMAKE_BINARY_DIR}/test/${MY_PROJ_NAME}")
+endif()
+
+
+

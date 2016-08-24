@@ -35,9 +35,10 @@
 
 # pragma once
 
-# include <dsn/dist/replication.h>
 # include <dsn/service_api_cpp.h>
 # include <dsn/dist/failure_detector_multimaster.h>
+# include <dsn/dist/replication.h>
+# include <dsn/tool_api.h>
 
 namespace dsn
 {
@@ -63,13 +64,13 @@ namespace dsn
                 ::dsn::partition_configuration configuration;
                 std::unique_ptr<std::thread> wait_thread;
                 dsn_handle_t process_handle;
-                std::atomic<bool> exited;
-                std::atomic<bool> resource_ready;
+                std::atomic<bool> exited; 
+                int not_exist_on_meta_count;
                 std::string working_dir;
-                std::string package_dir;
-                std::string runner_script;
                 uint16_t working_port;
                 std::string app_type;
+                std::string package_dir;
+                std::string runner_script;
 
                 app_internal(const ::dsn::replication::configuration_update_request & proposal)
                 {
@@ -77,16 +78,35 @@ namespace dsn
                     process_handle = nullptr;
                     exited = false;
                     working_port = 0;
-                    resource_ready = false;
                     app_type = proposal.info.app_type;
+                    not_exist_on_meta_count = 0;
+                }
+            };
+
+            typedef std::unordered_map< ::dsn::gpid, std::shared_ptr<app_internal>> same_package_apps;
+
+            struct package_internal
+            {                
+                bool resource_ready;
+                bool downloading;
+                same_package_apps apps;
+
+                std::string package_dir;
+                std::string app_type;
+                std::string runner_script;
+
+                package_internal(const std::string& app_type_)
+                {
+                    resource_ready = false;
+                    downloading = false;
+                    app_type = app_type_;
                 }
             };
 
             ::dsn::service::zrwlock_nr _lock;
-            typedef std::unordered_map< ::dsn::gpid, std::shared_ptr<app_internal>> apps;
-            apps _apps;
+            typedef std::unordered_map< std::string, std::shared_ptr<package_internal> > packages;
+            packages _apps;
             std::atomic<bool> _online;
-            std::atomic<bool> _under_deployment;
 
             std::string _working_dir;
             rpc_address _package_server;
@@ -94,6 +114,7 @@ namespace dsn
             uint32_t    _app_port_min; // inclusive
             uint32_t    _app_port_max; // inclusive
             uint32_t    _config_sync_interval_seconds; 
+            std::string _unzip_format_string; // e.g., unzip -qo %s.zip -d %s (src name => dst dir)
             
             task_ptr    _app_check_timer;
             task_ptr    _config_sync_timer;            
@@ -125,6 +146,8 @@ namespace dsn
             void check_apps();
 
             void on_kill_app_cli(void *context, int argc, const char **argv, dsn_cli_reply *reply);
+        private:
+            static void on_exit(::dsn::sys_exit_type);
         };
     }
 }
