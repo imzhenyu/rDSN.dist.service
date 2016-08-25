@@ -84,7 +84,7 @@ namespace dsn
             _package_dir_on_package_server = dsn_config_get_value_string("apps.daemon", "package_dir", "", "the dir on the app store where to download package");
             _app_port_min = (uint32_t)dsn_config_get_value_uint64("apps.daemon", "app_port_min", 59001, "the minimum port that can be assigned to app");
             _app_port_max = (uint32_t)dsn_config_get_value_uint64("apps.daemon", "app_port_max", 60001, "the maximum port that can be assigned to app");
-            _config_sync_interval_seconds = (uint32_t)dsn_config_get_value_uint64("apps.daemon", "config_sync_interval_seconds", 30, "sync configuration with meta server for every how many seconds");
+            _config_sync_interval_seconds = (uint32_t)dsn_config_get_value_uint64("apps.daemon", "config_sync_interval_seconds", 5, "sync configuration with meta server for every how many seconds");
 
 # ifdef _WIN32
             _unzip_format_string = dsn_config_get_value_string(
@@ -178,9 +178,22 @@ namespace dsn
                 LPC_DAEMON_APPS_CHECK_TIMER,
                 this,
                 [this]{ this->check_apps(); },
-                std::chrono::milliseconds(500)
+                std::chrono::milliseconds(
+                    (int)dsn_config_get_value_uint64("apps.daemon", "local_app_check_period_ms", 
+                        500, 
+                        "periodically check local apps' healthy status with this period")
+                        )
                 );
 
+
+            _config_sync_timer = tasking::enqueue_timer(
+                LPC_QUERY_CONFIGURATION_ALL,
+                this,
+                [this] {
+                query_configuration_by_node();
+                },
+                std::chrono::seconds(_config_sync_interval_seconds)
+                );
 
             _cli_kill_partition = dsn_cli_app_register(
                 "kill_partition",
@@ -199,14 +212,6 @@ namespace dsn
                 }
                 );
 
-            _config_sync_timer = tasking::enqueue_timer(
-                LPC_QUERY_CONFIGURATION_ALL,
-                this,
-                [this] {
-                    query_configuration_by_node(); 
-                },
-                std::chrono::seconds(_config_sync_interval_seconds)
-                );
         }
 
         void daemon_s_service::query_configuration_by_node()
@@ -255,7 +260,7 @@ namespace dsn
                 configuration_query_by_node_response resp;
                 ::dsn::unmarshall(response, resp);
 
-                if (resp.err != ERR_OK)
+                if (resp.err != ERR_OK || resp.err == ERR_BUSY)
                     return;
 
                 std::unordered_map<dsn::gpid, std::shared_ptr< app_internal> > apps;
@@ -289,8 +294,8 @@ namespace dsn
                     dassert(i < (int)appc.config.secondaries.size(),
                         "host address %s must exist in secondary list of partition %d.%d",
                         host.to_string(), appc.config.pid.get_app_id(), appc.config.pid.get_partition_index()
-                        );
-
+                    );
+                    
                     bool found = false;
                     auto it = apps.find(appc.config.pid);
                     if (it != apps.end())
@@ -303,7 +308,7 @@ namespace dsn
                     {
                         configuration_update_request req;
                         req.info = appc.info;
-                        req.config = appc.config;                        
+                        req.config = appc.config;
                         req.host_node = host;
                         req.type = config_type::CT_REMOVE;
 
@@ -322,10 +327,7 @@ namespace dsn
                 for (auto& app : apps)
                 {
                     auto cap = app.second;
-
-                    // check for 3 times and the app does not exit on meta
-                    if (++cap->not_exist_on_meta_count > 3)
-                        kill_app(std::move(cap));
+                    kill_app(std::move(cap));
                 }
             }
         }
@@ -428,16 +430,11 @@ namespace dsn
                     }
                     else
                     {
-                        ppackage.reset(new package_internal(proposal.info.app_type));
+                        ppackage.reset(new package_internal());
                         ppackage->package_dir = utils::filesystem::path_combine(_working_dir, proposal.info.app_type);
-# ifdef _WIN32
-                        const char* runner = "run.ps1";
-# else
-                        const char* runner = "run.sh";
-# endif
 
-                        // as package-dir/run.ps1,run.sh
-                        ppackage->runner_script = utils::filesystem::path_combine(ppackage->package_dir, runner);
+                        // each package is required with a config.ini in it for run as: dsn.svchost config.ini -cargs port=%port%;envs
+                        ppackage->config_file = utils::filesystem::path_combine(ppackage->package_dir, "config.ini");
 
                         _apps.emplace(proposal.info.app_type, ppackage);
                     }
@@ -472,9 +469,6 @@ namespace dsn
                         app.reset(new app_internal(proposal));
                         ppackage->apps.emplace(proposal.config.pid, app);
                     }
-
-                    app->package_dir = ppackage->package_dir;
-                    app->runner_script = ppackage->runner_script;
                 }
             }
                 
@@ -487,7 +481,7 @@ namespace dsn
             // check and start
             if (resource_ready)
             {                
-                start_app(std::move(app));
+                start_app(std::move(app), std::move(ppackage));
             }
 
             // download package first if necesary
@@ -514,7 +508,7 @@ namespace dsn
                     true,
                     LPC_DAEMON_DOWNLOAD_PACKAGE,
                     this,
-                    [this, pkg = std::move(ppackage)](error_code err, size_t sz) mutable
+                    [this, pkg = std::move(ppackage), capp = std::move(app)](error_code err, size_t sz) mutable
                     {
                         if (err == ERR_OK)
                         {
@@ -522,7 +516,7 @@ namespace dsn
                             char command[1024];
                             snprintf_p(command, sizeof(command), 
                                 _unzip_format_string.c_str(),
-                                (_working_dir + '/' + pkg->app_type).c_str(),
+                                (_working_dir + '/' + capp->info.app_type).c_str(),
                                 _working_dir.c_str()
                                 );
                             
@@ -541,12 +535,12 @@ namespace dsn
                                 utils::filesystem::remove_path(pkg->package_dir);
                                 {
                                     ::dsn::service::zauto_write_lock l(_lock);
-                                    _apps.erase(pkg->app_type);
+                                    _apps.erase(capp->info.app_type);
                                 }
                             }
                             else
                             {
-                                if (utils::filesystem::file_exists(pkg->runner_script))
+                                if (utils::filesystem::file_exists(pkg->config_file))
                                 {
                                     same_package_apps apps;
                                     {
@@ -558,14 +552,15 @@ namespace dsn
 
                                     for (auto& app : apps)
                                     {
-                                        start_app(std::move(app.second));
+                                        auto pkg2 = pkg;
+                                        start_app(std::move(app.second), std::move(pkg2));
                                     }
                                 }
                                 else
                                 {
-                                    derror("package %s does not contain runner '%s' in it",
+                                    derror("package %s does not contain config file '%s' in it",
                                         pkg->package_dir.c_str(),
-                                        pkg->runner_script.c_str()
+                                        pkg->config_file.c_str()
                                     );
 
                                     err = ERR_OBJECT_NOT_FOUND;
@@ -573,7 +568,7 @@ namespace dsn
                                     utils::filesystem::remove_path(pkg->package_dir);
                                     {
                                         ::dsn::service::zauto_write_lock l(_lock);
-                                        _apps.erase(pkg->app_type);
+                                        _apps.erase(capp->info.app_type);
                                     }
                                 }
                             }
@@ -582,7 +577,7 @@ namespace dsn
                         {
 
                             derror("download app %s failed, err = %s ...",
-                                pkg->app_type.c_str(),
+                                capp->info.app_type.c_str(),
                                 err.to_string()
                             );
 
@@ -591,7 +586,7 @@ namespace dsn
                                 ::dsn::service::zauto_write_lock l(_lock);
 
                                 // TODO: try multiple times for timeouts
-                                _apps.erase(pkg->app_type);
+                                _apps.erase(capp->info.app_type);
                             }
                         }
                     }
@@ -641,7 +636,7 @@ namespace dsn
             }
         }
 
-        void daemon_s_service::start_app(std::shared_ptr<app_internal> && app)
+        void daemon_s_service::start_app(std::shared_ptr<app_internal> && app, std::shared_ptr<package_internal>&& pkg)
         {
             dassert(nullptr == app->process_handle, "app handle must be empty at this point");
 
@@ -654,7 +649,7 @@ namespace dsn
                 {
                     std::stringstream ss;
                     ss << app->configuration.pid.get_app_id() << "." << app->configuration.pid.get_partition_index() << "." << port;
-                    app->working_dir = utils::filesystem::path_combine(app->package_dir, ss.str());
+                    app->working_dir = utils::filesystem::path_combine(pkg->package_dir, ss.str());
 
                     if (utils::filesystem::directory_exists(app->working_dir))
                         continue;
@@ -664,20 +659,25 @@ namespace dsn
 
                 std::stringstream ss;
 # ifdef _WIN32
-                ss << "powershell -Command \"" << app->runner_script << " " << port << "\"";
+                ss << "dsn.svchost.exe ";
 # else
-                ss << "cd " << app->working_dir << " && " << app->runner_script << " " << port;
+                ss << "cd " << app->working_dir << " && dsn.svchost ";
 # endif
+                ss << pkg->config_file << " -cargs port=" << port << ";";
+                for (auto& kv : app->info.envs)
+                {
+                    ss << kv.first << "=" << kv.second << ";";
+                }
+                
                 std::string command = ss.str();
 
                 app->working_port = port;
 
                 dinfo("try start app %s with command %s at working dir %s ...",
-                    app->app_type.c_str(),
+                    app->info.app_type.c_str(),
                     command.c_str(),
                     app->working_dir.c_str()
                     );
-
 # ifdef _WIN32
                 STARTUPINFOA si;
                 PROCESS_INFORMATION pi;
@@ -685,8 +685,9 @@ namespace dsn
                 ZeroMemory(&si, sizeof(si));
                 si.cb = sizeof(si);
                 ZeroMemory(&pi, sizeof(pi));
-                
-                if (::CreateProcessA(NULL, (LPSTR)command.c_str(), NULL, NULL, TRUE, CREATE_NEW_CONSOLE, NULL, 
+
+                if (::CreateProcessA(NULL, (LPSTR)command.c_str(), NULL, NULL, TRUE, CREATE_NEW_CONSOLE, 
+                    NULL, // env
                     (LPSTR)app->working_dir.c_str(), &si, &pi))
                 {
                     if (0 == ::AssignProcessToJobObject(_job, pi.hProcess))
@@ -762,14 +763,14 @@ namespace dsn
         void daemon_s_service::kill_app(std::shared_ptr<app_internal> && app)
         {
             dinfo("kill app %s at working dir %s, port %d",
-                app->app_type.c_str(),
+                app->info.app_type.c_str(),
                 app->working_dir.c_str(),
                 (int)app->working_port
                 );
 
             {
                 ::dsn::service::zauto_write_lock l(_lock);
-                auto it = _apps.find(app->app_type);
+                auto it = _apps.find(app->info.app_type);
                 if (it != _apps.end())
                 {
                     it->second->apps.erase(app->configuration.pid);
@@ -794,9 +795,10 @@ namespace dsn
                 app->exited = true;
             }
 
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
             utils::filesystem::remove_path(app->working_dir);
         }
-        
+
         void daemon_s_service::check_apps()
         {
             std::vector< std::shared_ptr< app_internal> > apps, delete_list;
@@ -825,7 +827,7 @@ namespace dsn
                         app->process_handle = nullptr;
 
                         dinfo("app %s exits (code = %x), with working dir = %s, port = %d",
-                            app->app_type.c_str(),
+                            app->info.app_type.c_str(),
                             exit_code,
                             app->working_dir.c_str(),
                             (int)app->working_port
@@ -841,7 +843,7 @@ namespace dsn
                         app->process_handle = nullptr;
 
                         dinfo("app %s exits, with working dir = %s, port = %d",
-                            app->app_type.c_str(),
+                            app->info.app_type.c_str(),
                             app->working_dir.c_str(),
                             (int)app->working_port
                             );

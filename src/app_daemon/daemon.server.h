@@ -68,9 +68,7 @@ namespace dsn
                 int not_exist_on_meta_count;
                 std::string working_dir;
                 uint16_t working_port;
-                std::string app_type;
-                std::string package_dir;
-                std::string runner_script;
+                ::dsn::app_info info;
 
                 app_internal(const ::dsn::replication::configuration_update_request & proposal)
                 {
@@ -78,8 +76,8 @@ namespace dsn
                     process_handle = nullptr;
                     exited = false;
                     working_port = 0;
-                    app_type = proposal.info.app_type;
                     not_exist_on_meta_count = 0;
+                    info = proposal.info;
                 }
             };
 
@@ -89,17 +87,14 @@ namespace dsn
             {                
                 bool resource_ready;
                 bool downloading;
-                same_package_apps apps;
-
+                same_package_apps apps;                
                 std::string package_dir;
-                std::string app_type;
-                std::string runner_script;
+                std::string config_file;
 
-                package_internal(const std::string& app_type_)
+                package_internal()
                 {
                     resource_ready = false;
                     downloading = false;
-                    app_type = app_type_;
                 }
             };
 
@@ -117,6 +112,7 @@ namespace dsn
             std::string _unzip_format_string; // e.g., unzip -qo %s.zip -d %s (src name => dst dir)
             
             task_ptr    _app_check_timer;
+            task_ptr    _app_sync_timer;
             task_ptr    _config_sync_timer;            
             dsn_handle_t _cli_kill_partition;
             
@@ -131,7 +127,7 @@ namespace dsn
             void on_add_app(const ::dsn::replication::configuration_update_request& proposal);
             void on_remove_app(const ::dsn::replication::configuration_update_request& proposal);
 
-            void start_app(std::shared_ptr<app_internal> &&  app);
+            void start_app(std::shared_ptr<app_internal> &&  app, std::shared_ptr<package_internal>&& pack);
             void kill_app(std::shared_ptr<app_internal> &&  app);
 
             void update_configuration_on_meta_server(::dsn::replication::config_type::type type, std::shared_ptr<app_internal>&& app);
