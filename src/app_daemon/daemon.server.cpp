@@ -301,6 +301,13 @@ namespace dsn
                     if (it != apps.end())
                     {
                         found = true;
+
+                        // update ballot when necessary
+                        if (appc.config.ballot > it->second->configuration.ballot)
+                        {
+                            it->second->configuration = appc.config;
+                        }
+
                         apps.erase(it);
                     }
 
@@ -412,7 +419,7 @@ namespace dsn
         void daemon_s_service::on_add_app(const ::dsn::replication::configuration_update_request & proposal)
         {
             std::shared_ptr<package_internal> ppackage;
-            std::shared_ptr<app_internal> old_app, app;
+            std::shared_ptr<app_internal> app;
             bool resource_ready = false;
             bool is_resource_downloading = false;
 
@@ -452,17 +459,13 @@ namespace dsn
                     // app is running with the same package
                     if (it != ppackage->apps.end())
                     {
-                        // proposal's package is older or the same
-                        // ballot is the package version for stateless applications
-                        if (proposal.config.ballot <= it->second->configuration.ballot)
-                            return;
-
-                        else
+                        // update config when necessary
+                        if (proposal.config.ballot > it->second->configuration.ballot)
                         {
-                            old_app = std::move(it->second);
-                            it->second.reset(new app_internal(proposal));
-                            app = it->second;
+                            it->second->configuration = proposal.config;
                         }
+
+                        return;
                     }
                     else
                     {
@@ -470,12 +473,6 @@ namespace dsn
                         ppackage->apps.emplace(proposal.config.pid, app);
                     }
                 }
-            }
-                
-            // kill old app if necessary
-            if (nullptr != old_app)
-            {
-                kill_app(std::move(old_app));
             }
             
             // check and start
@@ -611,12 +608,13 @@ namespace dsn
                     if (it2 != it->second->apps.end())
                     {
                         // proposal's package is older or the same
-                        // ballot is the package version for stateless applications
                         if (proposal.config.ballot <= it2->second->configuration.ballot)
                             return;
                         else
                         {
                             app = std::move(it2->second);
+                            app->configuration = proposal.config;
+
                             it->second->apps.erase(it2);
                             if (it->second->apps.empty())
                             {
@@ -795,7 +793,7 @@ namespace dsn
                 app->exited = true;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1 ));
             utils::filesystem::remove_path(app->working_dir);
         }
 
@@ -878,27 +876,28 @@ namespace dsn
             request->type = type;
             request->node = node;
             request->host_node = primary_address();
-
+            
+            request->config.ballot++;
             if (type == config_type::CT_REMOVE)
             {
                 auto it = std::remove(
-                    app->configuration.secondaries.begin(),
-                    app->configuration.secondaries.end(),
+                    request->config.secondaries.begin(),
+                    request->config.secondaries.end(),
                     request->host_node
                     );
-                app->configuration.secondaries.erase(it);
+                request->config.secondaries.erase(it);
 
                 it = std::remove(
-                    app->configuration.last_drops.begin(),
-                    app->configuration.last_drops.end(),
+                    request->config.last_drops.begin(),
+                    request->config.last_drops.end(),
                     node
                     );
-                app->configuration.last_drops.erase(it);
+                request->config.last_drops.erase(it);
             }
             else
             {
-                app->configuration.secondaries.emplace_back(request->host_node);
-                app->configuration.last_drops.emplace_back(node);
+                request->config.secondaries.emplace_back(request->host_node);
+                request->config.last_drops.emplace_back(node);
             }
 
             ::dsn::marshall(msg, *request);
@@ -929,6 +928,9 @@ namespace dsn
             if (err == ERR_OK)
             {
                 ::dsn::unmarshall(response, resp);
+                if (resp.config.ballot <= app->configuration.ballot)
+                    return;
+
                 err = resp.err;
             }
             else if (err == ERR_TIMEOUT)
@@ -942,14 +944,20 @@ namespace dsn
                         on_update_configuration_on_meta_server_reply(type, std::move(cap_app), err, reqmsg, response);
                     }
                     );
+                return;
             }
-            else
+
+
+            if (err != ERR_OK)
             {
                 if (type == config_type::CT_ADD_SECONDARY)
                     kill_app(std::move(app));
             }
+            else
+            {
+                app->configuration = resp.config;
+            }
         }
-
 
         ::dsn::error_code daemon::start(int argc, char** argv)
         {

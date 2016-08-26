@@ -963,12 +963,12 @@ void server_state::update_configuration_locally(app_state& app, std::shared_ptr<
     partition_configuration& old_cfg = app.partitions[gpid.get_partition_index()];
     partition_configuration& new_cfg = config_request->config;
 
+    dassert(old_cfg.ballot + 1 == new_cfg.ballot,
+        "invalid configuration update request, old ballot %" PRId64 ", new ballot %" PRId64 "",
+        old_cfg.ballot, new_cfg.ballot);
+
     if (app.is_stateful)
     {
-        dassert(old_cfg.ballot+1 == new_cfg.ballot,
-            "invalid configuration update request, old ballot %" PRId64 ", new ballot %" PRId64 "",
-            old_cfg.ballot, new_cfg.ballot);
-
         auto iter = _nodes.find(config_request->node);
         dassert(iter != _nodes.end(), "");
         node_state& ns = iter->second;
@@ -1011,32 +1011,6 @@ void server_state::update_configuration_locally(app_state& app, std::shared_ptr<
     }
     else
     {
-        dassert(old_cfg.ballot == new_cfg.ballot, "");
-
-        new_cfg = old_cfg;
-        partition_configuration_stateless pcs(new_cfg);
-        if (config_request->type == config_type::type::CT_ADD_SECONDARY)
-        {
-            pcs.hosts().emplace_back(config_request->host_node);
-            pcs.workers().emplace_back(config_request->node);
-        }
-        else
-        {
-            auto it = std::remove(
-                pcs.hosts().begin(),
-                pcs.hosts().end(), 
-                config_request->host_node
-                );
-            pcs.hosts().erase(it);
-
-            it = std::remove(
-                pcs.workers().begin(),
-                pcs.workers().end(),
-                config_request->node
-                );
-            pcs.workers().erase(it);
-        }
-
         auto it = _nodes.find(config_request->host_node);
         dassert(it != _nodes.end(), "");
         if (config_type::CT_REMOVE == config_request->type)
@@ -1259,16 +1233,16 @@ void server_state::on_update_configuration(std::shared_ptr<configuration_update_
         dsn_msg_release_ref(msg);
         return;
     }
-    else if (app->is_stateful)
+    else if (pc.ballot + 1 != cfg_request->config.ballot)
     {
-        if (pc.ballot+1 != cfg_request->config.ballot)
-        {
-            ddebug("update configuration for gpid(%d.%d) reject coz ballot not match, request ballot: %" PRId64 ", meta ballot: %" PRId64 "",
-                   gpid.get_app_id(), gpid.get_partition_index(), cfg_request->config.ballot, pc.ballot);
-            response.err = ERR_INVALID_VERSION;
-            response.config = pc;
-        }
-        else
+        ddebug("update configuration for gpid(%d.%d) reject coz ballot not match, request ballot: %" PRId64 ", meta ballot: %" PRId64 "",
+            gpid.get_app_id(), gpid.get_partition_index(), cfg_request->config.ballot, pc.ballot);
+        response.err = ERR_INVALID_VERSION;
+        response.config = pc;
+    }
+    else // ok
+    {
+        if (app->is_stateful)
         {
             switch (cfg_request->type)
             {
@@ -1285,38 +1259,9 @@ void server_state::on_update_configuration(std::shared_ptr<configuration_update_
                 break;
             }
         }
-    }
-    else
-    {
-        partition_configuration_stateless pcs(pc);
-        partition_configuration_stateless request_pcs(cfg_request->config);
-        if (cfg_request->config.ballot != pc.ballot)
-        {
-            dwarn("received invalid update configuration request from %s, gpid = %d.%d, ballot = %" PRId64 ", cur_ballot = %" PRId64,
-                cfg_request->node.to_string(), pc.pid.get_app_id(), pc.pid.get_partition_index(), cfg_request->config.ballot, pc.ballot);
-            response.err = ERR_INVALID_VERSION;
-            response.config = pc;
-        }
         else
         {
-            if (config_type::CT_REMOVE == cfg_request->type)
-            {
-                // removed already
-                if (!pcs.is_host(cfg_request->host_node) || !pcs.is_worker(cfg_request->node))
-                {
-                    response.err = ERR_OK;
-                    response.config = pc;
-                }
-            }
-            else
-            {
-                // added already
-                if (pcs.is_host(cfg_request->host_node))
-                {
-                    response.err = ERR_OK;
-                    response.config = pc;
-                }
-            }
+            // nothing to do, the daemon should already maintain ok for the config in requests
         }
     }
 
