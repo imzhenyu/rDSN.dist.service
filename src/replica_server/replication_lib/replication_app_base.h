@@ -201,6 +201,7 @@ private:
         );
 
     void install_perf_counters();
+    void uninstall_perf_counters();
 
 private:
     void* _app_context;

@@ -223,6 +223,14 @@ void replication_app_base::install_perf_counters()
     _app_req_throughput.init("eon.app", ss.str().c_str(), COUNTER_TYPE_RATE, "request throughput for current app");
 }
 
+void replication_app_base::uninstall_perf_counters()
+{
+    _app_commit_throughput.destroy();
+    _app_commit_latency.destroy();
+    _app_commit_decree.destroy();
+    _app_req_throughput.destroy();
+}
+
 void replication_app_base::reset_counters_after_learning()
 {
     _app_commit_decree.set(last_committed_decree());
@@ -305,22 +313,24 @@ error_code replication_app_base::open_new_internal(replica* r, int64_t shared_lo
 
 ::dsn::error_code replication_app_base::close(bool clear_state)
 {
+    ::dsn::error_code err;
     if (_app_context)
     {
-        auto err = dsn_hosted_app_destroy(_app_context, clear_state);
+        err = dsn_hosted_app_destroy(_app_context, clear_state);
         if (err == ERR_OK)
         {
             _last_committed_decree.store(0);
             _app_context = nullptr;
             _app_context_callbacks = nullptr;
         }
-
-        return err;
     }
     else
     {
-        return ERR_SERVICE_NOT_ACTIVE;
+        err = ERR_SERVICE_NOT_ACTIVE;
     }
+
+    uninstall_perf_counters();
+    return err;
 }
 
 ::dsn::error_code replication_app_base::prepare_get_checkpoint(/*out*/ ::dsn::blob& learn_req)
