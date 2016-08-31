@@ -130,8 +130,10 @@ namespace dsn
 
         void daemon_s_service::on_config_proposal(const ::dsn::replication::configuration_update_request& proposal)
         {
-            dassert(proposal.info.is_stateful == false, 
-                "stateful replication not supported by daemon, please using a different layer2 handler");
+            dinfo("receive config proposal for %s with type %s at ballot %" PRId64,
+                proposal.info.app_name.c_str(),
+                enum_to_string(proposal.type)
+                );
 
             switch (proposal.type)
             {
@@ -317,16 +319,27 @@ namespace dsn
                         req.info = appc.info;
                         req.config = appc.config;
                         req.host_node = host;
-                        req.type = config_type::CT_REMOVE;
 
-                        // worker nodes stored in last-drops
-                        req.node = appc.config.last_drops[i];
+                        // for stateful services, we restart it here
+                        if (appc.info.is_stateful)
+                        {
+                            on_add_app(req);
+                        }
 
-                        std::shared_ptr<app_internal> app(new app_internal(req));
-                        app->exited = true;
-                        app->working_port = req.node.port();
+                        // for stateless services, we simply remove it
+                        else
+                        {
+                            req.type = config_type::CT_REMOVE;
 
-                        update_configuration_on_meta_server(config_type::CT_REMOVE, std::move(app));
+                            // worker nodes stored in last-drops
+                            req.node = appc.config.last_drops[i];
+
+                            std::shared_ptr<app_internal> app(new app_internal(req));
+                            app->exited = true;
+                            app->working_port = req.node.port();
+
+                            update_configuration_on_meta_server(req.type, std::move(app));
+                        }
                     }
                 }
 
@@ -656,12 +669,30 @@ namespace dsn
                 }
 
                 std::stringstream ss;
+                std::string config_file = pkg->config_file;
+
+                // developers overwrite the default config file using RDSN_TARGET_CONFIG env var
+                if (app->info.envs.find("RDSN_TARGET_CONFIG") != app->info.envs.end())
+                {
+                    config_file = utils::filesystem::path_combine(pkg->package_dir, app->info.envs["RDSN_TARGET_CONFIG"]);
+                    if (!utils::filesystem::file_exists(config_file))
+                    {
+                        derror("package %s does not contain config file '%s' in it",
+                            pkg->package_dir.c_str(),
+                            config_file.c_str()
+                            );
+
+                        kill_app(std::move(app));
+                        return;
+                    }
+                }
+                
 # ifdef _WIN32
                 ss << "dsn.svchost.exe ";
 # else
                 ss << "cd " << app->working_dir << " && dsn.svchost ";
 # endif
-                ss << pkg->config_file << " -cargs port=" << port << ";";
+                ss << config_file << " -cargs port=" << port << ";";
                 for (auto& kv : app->info.envs)
                 {
                     ss << kv.first << "=" << kv.second << ";";
