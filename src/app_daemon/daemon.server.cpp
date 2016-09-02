@@ -690,7 +690,9 @@ namespace dsn
 # ifdef _WIN32
                 ss << "dsn.svchost.exe ";
 # else
-                ss << "cd " << app->working_dir << " && dsn.svchost ";
+                ss << "cd " << app->working_dir 
+                   << " && export LD_LIBRARY_PATH=" << app->working_dir 
+                   << ":$LD_LIBRARY_PATH && dsn.svchost ";
 # endif
                 ss << config_file << " -cargs port=" << port << ";";
                 for (auto& kv : app->info.envs)
