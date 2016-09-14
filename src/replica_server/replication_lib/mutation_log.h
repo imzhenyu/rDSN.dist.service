@@ -407,11 +407,13 @@ public:
         gpid gpid,
         replica* r,
         uint32_t batch_buffer_bytes,
-        uint32_t batch_buffer_max_count
+        uint32_t batch_buffer_max_count,
+        bool force_flush
         ) : 
         mutation_log(dir, max_log_file_mb, gpid, r), 
         _batch_buffer_bytes(batch_buffer_bytes), 
-        _batch_buffer_max_count(batch_buffer_max_count)
+        _batch_buffer_max_count(batch_buffer_max_count),
+        _force_flush(force_flush)
     {
         mutation_log_private::init_states();
     }
@@ -442,9 +444,11 @@ private:
 private:
     // bufferring - only one concurrent write is allowed
     typedef std::vector<mutation_ptr> mutations;
+    typedef std::vector<task_ptr>  callbacks;
     std::atomic_bool               _is_writing;
     std::weak_ptr<mutations>       _issued_write_mutations;
     std::shared_ptr<log_block>     _pending_write;
+    std::shared_ptr<callbacks>     _pending_write_callbacks;
     std::shared_ptr<mutations>     _pending_write_mutations;
     int64_t                        _pending_write_start_offset;
     decree                         _pending_write_max_commit; 
@@ -453,6 +457,7 @@ private:
 
     uint32_t                       _batch_buffer_bytes;
     uint32_t                       _batch_buffer_max_count;
+    bool                           _force_flush;
 };
 
 //

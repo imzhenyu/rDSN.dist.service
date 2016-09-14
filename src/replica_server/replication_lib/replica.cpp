@@ -224,8 +224,11 @@ void replica::check_state_completeness()
     dassert(max_prepared_decree() >= last_committed_decree(), "");
     dassert(last_committed_decree() >= last_durable_decree(), "");
 
-    auto mind = _stub->_log->max_gced_decree(get_gpid(), _app->init_info().init_offset_in_shared_log);
-    dassert(mind <= last_durable_decree(), "");
+    if (_options->log_shared_enabled)
+    {
+        auto mind = _stub->_log->max_gced_decree(get_gpid(), _app->init_info().init_offset_in_shared_log);
+        dassert(mind <= last_durable_decree(), "");
+    }
 
     if (_private_log != nullptr)
     {   
@@ -348,6 +351,11 @@ mutation_ptr replica::new_mutation(decree decree)
     mu->data.header.decree = decree;
     mu->data.header.log_offset = invalid_offset;
     return mu;
+}
+
+mutation_log* replica::rep_log()
+{ 
+    return _options->log_shared_enabled ? _stub->_log.get() : _private_log.get(); 
 }
 
 bool replica::group_configuration(/*out*/ partition_configuration& config) const

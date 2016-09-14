@@ -303,7 +303,8 @@ TEST(replication, mutation_log)
         gpid,
         nullptr,
         1024,
-        512
+        512,
+        false
         );
 
     auto err = mlog->open(nullptr, nullptr);
@@ -343,7 +344,8 @@ TEST(replication, mutation_log)
         gpid,
         nullptr,
         1024,
-        512
+        512,
+        false
         );
 
     int mutation_index = -1;

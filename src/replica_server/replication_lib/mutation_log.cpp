@@ -229,7 +229,8 @@ void mutation_log_shared::write_pending_mutations(bool release_lock)
     aio_handler&& callback,
     int hash)
 {
-    dassert(nullptr == callback, "callback is not needed in private mutation log");
+    ::dsn::task_ptr cb = callback ? file::create_aio_task(callback_code, callback_host,
+        std::forward<aio_handler>(callback), hash) : nullptr;
 
     _plock.lock();
 
@@ -237,12 +238,19 @@ void mutation_log_shared::write_pending_mutations(bool release_lock)
     if (nullptr == _pending_write)
     {
         _pending_write.reset(log_file::prepare_log_block());
+        _pending_write_callbacks.reset(new callbacks());
         _pending_write_mutations.reset(new mutations());
         _pending_write_start_offset = mark_new_offset(0, true).second;
     }
 
     // save mu for pinning buffer
     _pending_write_mutations->push_back(mu);
+
+    // save cb for pinning buffer
+    if (cb)
+    {
+        _pending_write_callbacks->push_back(cb);
+    }
     
     // write mutation to pending buffer
     mu->data.header.log_offset = _pending_write_start_offset + _pending_write->size();
@@ -269,7 +277,7 @@ void mutation_log_shared::write_pending_mutations(bool release_lock)
         _plock.unlock();
     }
     
-    return nullptr;
+    return std::move(cb);
 }
 
 bool mutation_log_private::get_learn_state_in_memory(
@@ -375,6 +383,7 @@ void mutation_log_private::write_pending_mutations(bool release_lock)
     auto blk = std::move(_pending_write);
     _issued_write_mutations = _pending_write_mutations;
     auto pwu = std::move(_pending_write_mutations);
+    auto pwc = std::move(_pending_write_callbacks);
     auto soffset = _pending_write_start_offset;
     _pending_write_start_offset = 0;
     auto max_commit = _pending_write_max_commit;
@@ -393,7 +402,8 @@ void mutation_log_private::write_pending_mutations(bool release_lock)
         lf = pr.first,
         block = blk,
         max_commit,
-        mutations = std::move(pwu)
+        mutations = std::move(pwu),
+        callbacks = std::move(pwc)
         ](error_code err, size_t sz) mutable
         {
             dassert(_is_writing.load(std::memory_order_relaxed), "");
@@ -411,12 +421,15 @@ void mutation_log_private::write_pending_mutations(bool release_lock)
 
                 dassert(hdr->length + sizeof(log_block_header) == sz, "");
 
-                // flush to ensure that there is no gap between private log and in-memory buffer
-                // so that we can get all mutations in learning process.
-                //
-                // FIXME : the file could have been closed
-                lf->flush();
-
+                if (_force_flush)
+                {
+                    // flush to ensure that there is no gap between private log and in-memory buffer
+                    // so that we can get all mutations in learning process.
+                    //
+                    // FIXME : the file could have been closed
+                    lf->flush();
+                }
+                
                 // update _private_max_commit_on_disk after writen into log file done
                 update_max_commit_on_disk(max_commit);
             }
@@ -426,6 +439,12 @@ void mutation_log_private::write_pending_mutations(bool release_lock)
             // the next init_prepare() not starting the write.
             _is_writing.store(false, std::memory_order_relaxed);
             
+
+            for (auto& cb : *callbacks)
+            {
+                cb->enqueue_aio(err, 0);
+            }
+
             // notify error when necessary
             if (err != ERR_OK)
             {

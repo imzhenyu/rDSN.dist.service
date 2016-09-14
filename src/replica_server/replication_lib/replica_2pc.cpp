@@ -133,7 +133,7 @@ void replica::init_prepare(mutation_ptr& mu)
         dassert(mu->data.header.log_offset == invalid_offset, "");
         dassert(mu->log_task() == nullptr, "");
 
-        mu->log_task() = _stub->_log->append(mu,
+        mu->log_task() = rep_log()->append(mu,
             LPC_WRITE_REPLICATION_LOG,
             this,
             std::bind(&replica::on_append_log_completed, this, mu,
@@ -329,7 +329,7 @@ void replica::on_prepare(dsn_message_t request)
     }
 
     dassert(mu->log_task() == nullptr, "");
-    mu->log_task() = _stub->_log->append(mu,
+    mu->log_task() = rep_log()->append(mu,
         LPC_WRITE_REPLICATION_LOG,
         this,
         std::bind(&replica::on_append_log_completed, this, mu,
@@ -395,7 +395,10 @@ void replica::on_append_log_completed(mutation_ptr& mu, error_code err, size_t s
     }
    
     // write local private log if necessary
-    if (err == ERR_OK && status() != partition_status::PS_ERROR)
+    if (_options->log_shared_enabled 
+        && err == ERR_OK 
+        && status() != partition_status::PS_ERROR
+        )
     {
         _private_log->append(mu,
             LPC_WRITE_REPLICATION_LOG,
@@ -558,7 +561,7 @@ void replica::cleanup_preparing_mutations(bool wait)
             // make sure the buffers from mutations are valid for underlying aio
             //
             if (wait) {
-                _stub->_log->flush();
+                rep_log()->flush();
                 mu->wait_log_task();
             }
         }

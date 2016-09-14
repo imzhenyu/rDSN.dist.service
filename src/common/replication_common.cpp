@@ -78,10 +78,12 @@ replication_options::replication_options()
     log_private_file_size_mb = 32;
     log_private_batch_buffer_kb = 512;
     log_private_batch_buffer_count = 512;
+    log_private_force_flush = false;
 
     log_shared_file_size_mb = 32;
     log_shared_batch_buffer_kb = 0;
     log_shared_force_flush = false;
+    log_shared_enabled = true;
 
     config_sync_disabled = false;
     config_sync_interval_ms = 30000;
@@ -306,6 +308,12 @@ void replication_options::initialize()
         log_private_batch_buffer_count,
         "private log buffer max item count for batching incoming logs"
         );
+    log_private_force_flush =
+        dsn_config_get_value_bool("replication",
+            "log_private_force_flush",
+            log_private_force_flush,
+            "when write private log, whether to flush file after write done"
+        );
 
     log_shared_file_size_mb =
         (int)dsn_config_get_value_uint64("replication", 
@@ -325,6 +333,19 @@ void replication_options::initialize()
         log_shared_force_flush,
         "when write shared log, whether to flush file after write done"
         );
+    log_shared_enabled =
+        dsn_config_get_value_bool("replication",
+            "log_shared_enabled",
+            log_shared_enabled,
+            "whether to enable shared log, default is true; "
+            "when it is disabled, we use private log only as replication log"
+        );
+
+    // no delay for private log when shared log is not enabled
+    if (!log_shared_enabled)
+    {
+        log_private_batch_buffer_kb = 0;
+    }
 
     config_sync_disabled =
         dsn_config_get_value_bool("replication", 

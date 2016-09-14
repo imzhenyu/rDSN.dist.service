@@ -153,12 +153,15 @@ void replica_stub::initialize(const replication_options& opts, bool clear/* = fa
         count++;
     }
 
-    _log = new mutation_log_shared(
-        _options.slog_dir,
-        _options.log_shared_file_size_mb,
-        _options.log_shared_force_flush
+    if (_options.log_shared_enabled)
+    {
+        _log = new mutation_log_shared(
+            _options.slog_dir,
+            _options.log_shared_file_size_mb,
+            _options.log_shared_force_flush
         );
-    ddebug("slog_dir = %s", _options.slog_dir.c_str());
+        ddebug("slog_dir = %s", _options.slog_dir.c_str());
+    }
 
     // init rps
     ddebug("start to load replicas");
@@ -234,18 +237,21 @@ void replica_stub::initialize(const replication_options& opts, bool clear/* = fa
         finish_time - start_time
         );
 
-    // init shared prepare log
-    ddebug("start to replay shared log");
-
-    std::map<gpid, decree> replay_condition;
-    for (auto it = rps.begin(); it != rps.end(); ++it)
+    error_code err = ERR_OK;
+    if (_options.log_shared_enabled)
     {
-        replay_condition[it->first] = it->second->last_committed_decree();
-    }
+        // init shared prepare log
+        ddebug("start to replay shared log");
 
-    start_time = dsn_now_ms();
-    error_code err = _log->open(
-        [&rps](mutation_ptr& mu)
+        std::map<gpid, decree> replay_condition;
+        for (auto it = rps.begin(); it != rps.end(); ++it)
+        {
+            replay_condition[it->first] = it->second->last_committed_decree();
+        }
+
+        start_time = dsn_now_ms();
+        err = _log->open(
+            [&rps](mutation_ptr& mu)
         {
             auto it = rps.find(mu->data.header.pid);
             if (it != rps.end())
@@ -257,68 +263,69 @@ void replica_stub::initialize(const replication_options& opts, bool clear/* = fa
                 return false;
             }
         },
-        [this](error_code err) { this->handle_log_failure(err); },
-        replay_condition
-    );
-    finish_time = dsn_now_ms();
-
-    if (err == ERR_OK)
-    {
-        ddebug(
-            "replay shared log succeed, time_used = %" PRIu64 " ms",
-            finish_time - start_time
+            [this](error_code err) { this->handle_log_failure(err); },
+            replay_condition
             );
-    }
-    else
-    {
-        derror(
-            "replay shared log failed, err = %s, time_used = %" PRIu64 " ms, clear all logs ...",
-            err.to_string(),
-            finish_time - start_time
-            );
+        finish_time = dsn_now_ms();
 
-        // we must delete or update meta server the error for all replicas
-        // before we fix the logs
-        // otherwise, the next process restart may consider the replicas'
-        // state complete
-
-        // delete all replicas
-        // TODO: checkpoint latest state and update on meta server so learning is cheaper
-        for (auto it = rps.begin(); it != rps.end(); ++it)
+        if (err == ERR_OK)
         {
-            it->second->close();
-            std::string new_dir = it->second->dir() + ".err";
-            if (utils::filesystem::directory_exists(it->second->dir()))
+            ddebug(
+                "replay shared log succeed, time_used = %" PRIu64 " ms",
+                finish_time - start_time
+            );
+        }
+        else
+        {
+            derror(
+                "replay shared log failed, err = %s, time_used = %" PRIu64 " ms, clear all logs ...",
+                err.to_string(),
+                finish_time - start_time
+            );
+
+            // we must delete or update meta server the error for all replicas
+            // before we fix the logs
+            // otherwise, the next process restart may consider the replicas'
+            // state complete
+
+            // delete all replicas
+            // TODO: checkpoint latest state and update on meta server so learning is cheaper
+            for (auto it = rps.begin(); it != rps.end(); ++it)
             {
-                if (!utils::filesystem::rename_path(it->second->dir(), new_dir))
+                it->second->close();
+                std::string new_dir = it->second->dir() + ".err";
+                if (utils::filesystem::directory_exists(it->second->dir()))
                 {
-                    dassert(false, "we cannot recover from the above error, exit ...");
+                    if (!utils::filesystem::rename_path(it->second->dir(), new_dir))
+                    {
+                        dassert(false, "we cannot recover from the above error, exit ...");
+                    }
                 }
             }
-        }
-        rps.clear();
+            rps.clear();
 
-        // restart log service
-        _log->close();
-        _log = nullptr;
-        if (!utils::filesystem::remove_path(_options.slog_dir))
-        {
-            dassert(false, "remove directory %s failed", _options.slog_dir.c_str());
-        }
-        _log = new mutation_log_shared(
-            _options.slog_dir,
-            _options.log_shared_file_size_mb,
-            _options.log_shared_force_flush
+            // restart log service
+            _log->close();
+            _log = nullptr;
+            if (!utils::filesystem::remove_path(_options.slog_dir))
+            {
+                dassert(false, "remove directory %s failed", _options.slog_dir.c_str());
+            }
+            _log = new mutation_log_shared(
+                _options.slog_dir,
+                _options.log_shared_file_size_mb,
+                _options.log_shared_force_flush
             );
-        auto lerr = _log->open(nullptr, [this](error_code err) { this->handle_log_failure(err); });
-        dassert(lerr == ERR_OK, "restart log service must succeed");
+            auto lerr = _log->open(nullptr, [this](error_code err) { this->handle_log_failure(err); });
+            dassert(lerr == ERR_OK, "restart log service must succeed");
+        }
     }
 
     for (auto it = rps.begin(); it != rps.end(); ++it)
     {
         it->second->reset_prepare_list_after_replay();
                 
-        decree smax = _log->max_decree(it->first);
+        decree smax = _log ? _log->max_decree(it->first) : 0;
         decree pmax = invalid_decree;
         decree pmax_commit = invalid_decree;
         if (it->second->private_log())
@@ -329,7 +336,10 @@ void replica_stub::initialize(const replication_options& opts, bool clear/* = fa
             // possible when shared log is restarted
             if (smax == 0)
             {
-                _log->update_max_decree(it->first, pmax);
+                if (_log)
+                {
+                    _log->update_max_decree(it->first, pmax);
+                }
                 smax = pmax;
             }
 

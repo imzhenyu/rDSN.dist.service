@@ -195,7 +195,7 @@ error_code replica::init_app_and_prepare_list(bool create_new)
     {
         err = _app->open_new_internal(
             this,
-            _stub->_log->on_partition_reset(get_gpid(), 0),
+            _options->log_shared_enabled ? rep_log()->on_partition_reset(get_gpid(), 0) : 0,
             0
             );
     }        
@@ -213,14 +213,18 @@ error_code replica::init_app_and_prepare_list(bool create_new)
                 get_gpid(),
                 this,
                 _options->log_private_batch_buffer_kb * 1024,
-                _options->log_private_batch_buffer_count
-                );
+                _options->log_private_batch_buffer_count,
+                _options->log_private_force_flush
+            );
             ddebug("%s: plog_dir = %s", name(), log_dir.c_str());
 
             // sync valid_start_offset between app and logs
-            _stub->_log->set_valid_start_offset_on_open(get_gpid(),
-                _app->init_info().init_offset_in_shared_log
+            if (_options->log_shared_enabled)
+            {
+                _stub->_log->set_valid_start_offset_on_open(get_gpid(),
+                    _app->init_info().init_offset_in_shared_log
                 );
+            }
             _private_log->set_valid_start_offset_on_open(get_gpid(),
                 _app->init_info().init_offset_in_private_log
                 );
@@ -294,7 +298,8 @@ error_code replica::init_app_and_prepare_list(bool create_new)
                     _private_log->close();
                     _private_log = nullptr;
 
-                    _stub->_log->on_partition_removed(get_gpid());
+                    if (_options->log_shared_enabled)
+                        _stub->_log->on_partition_removed(get_gpid());
                 }
             }
         }
@@ -328,7 +333,8 @@ error_code replica::init_app_and_prepare_list(bool create_new)
                 get_gpid(),
                 this,
                 _options->log_private_batch_buffer_kb * 1024,
-                _options->log_private_batch_buffer_count
+                _options->log_private_batch_buffer_count,
+                _options->log_private_force_flush
                 );
             ddebug("%s: plog_dir = %s", name(), log_dir.c_str());
 

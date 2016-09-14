@@ -143,6 +143,7 @@ private:
     void response_client_message(dsn_message_t request, error_code error);    
     void execute_mutation(mutation_ptr& mu);
     mutation_ptr new_mutation(decree decree);    
+    mutation_log* rep_log();
         
     // initialization
     replica(replica_stub* stub, gpid gpid, const app_info& app, const char* dir);

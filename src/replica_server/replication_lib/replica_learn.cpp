@@ -535,7 +535,7 @@ void replica::on_learn_reply(
         {
             err = _app->open_new_internal(
                 this,
-                _stub->_log->on_partition_reset(get_gpid(), 0),
+                _options->log_shared_enabled ? _stub->_log->on_partition_reset(get_gpid(), 0) : 0,
                 _private_log->on_partition_reset(get_gpid(), 0)
                 );
 
@@ -588,7 +588,7 @@ void replica::on_learn_reply(
         // appended by the mutations AFTER current position
         err = _app->update_init_info(
             this,
-            _stub->_log->on_partition_reset(get_gpid(), _app->last_committed_decree()),
+            _options->log_shared_enabled ? _stub->_log->on_partition_reset(get_gpid(), _app->last_committed_decree()) : 0,
             _private_log->on_partition_reset(get_gpid(), _app->last_committed_decree()),
             _app->last_committed_decree()
             );
@@ -603,7 +603,7 @@ void replica::on_learn_reply(
             enum_to_string(_potential_secondary_states.learning_status)
             );
         
-        // persist incoming mutations into private log and apply them to prepare-list
+        // persist incoming mutations into rep log and apply them to prepare-list
         std::pair<decree, decree> cache_range;
         binary_reader reader(resp.state.meta);
         while (!reader.is_eof())
@@ -613,15 +613,18 @@ void replica::on_learn_reply(
             {
                 dinfo("%s: on_learn_reply[%016" PRIx64 "]: apply learned mutation %s", name(), req.signature, mu->name());
 
-                // write to shared log with no callback, the later 2pc ensures that logs
+                // write to rep log with no callback, the later 2pc ensures that logs
                 // are written to the disk
-                _stub->_log->append(mu, LPC_WRITE_REPLICATION_LOG, this, nullptr);
+                rep_log()->append(mu, LPC_WRITE_REPLICATION_LOG, this, nullptr);
 
-                // because shared log are written without callback, need to manully
-                // set flag and write mutations to private log
+                // because rep log are written without callback, need to manully
+                // set flag and write mutations to private log if necessary
                 mu->set_logged();
-                _private_log->append(mu, LPC_WRITE_REPLICATION_LOG, this, nullptr);                
-
+                if (!_options->log_shared_enabled)
+                {
+                    _private_log->append(mu, LPC_WRITE_REPLICATION_LOG, this, nullptr);
+                }
+                
                 // then we prepare, it is possible that a committed mutation exists in learner's prepare log,
                 // but with DIFFERENT ballot. Reference https://github.com/imzhenyu/rDSN/issues/496
                 mutation_ptr existing_mutation = _prepare_list->get_mutation_by_decree(mu->data.header.decree);
