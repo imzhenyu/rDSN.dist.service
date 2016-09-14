@@ -376,3 +376,200 @@ TEST(replication, mutation_log)
     // clear all
     utils::filesystem::remove_path(logp);
 }
+
+mutation_ptr generate_mutation(uint64_t block_size)
+{
+    gpid gd;
+    gd.set_app_id(1);
+    gd.set_partition_index(1);
+
+    // prepare mutation
+    mutation_ptr mu(new mutation());
+    mu->data.header.ballot = 1;
+    mu->data.header.decree = 0xdeadbeef;
+    mu->data.header.pid = gd;
+    mu->data.header.last_committed_decree = 0;
+    mu->data.header.log_offset = 0;
+    binary_writer writer;
+    std::unique_ptr<char[]> buffer(new char[block_size]);
+    writer.write((const char*)buffer.get(), block_size);
+    mu->data.updates.push_back(mutation_update());
+    mu->data.updates.back().code = RPC_REPLICATION_WRITE_EMPTY;
+    mu->data.updates.back().data = writer.get_buffer();
+    mu->client_requests.push_back(nullptr);
+
+    return mu;
+}
+
+void mutation_log_testcase(uint64_t block_size, size_t concurrency, bool is_write, bool force_flush, bool shared)
+{
+    gpid gd;
+    gd.set_app_id(1);
+    gd.set_partition_index(1);
+
+    // prepare logs
+    std::vector<mutation_log_ptr> logs;
+    logs.resize(concurrency);
+    auto log_count = concurrency;
+    if (shared)
+    {
+        log_count = 1;
+    }
+
+    if (is_write)
+    {
+        for (int i = 0; i < log_count; i++)
+        {
+            std::stringstream ss;
+            ss << "temp." << i;
+            auto path = ss.str();
+            if (utils::filesystem::directory_exists(path))
+                utils::filesystem::remove_path(path);
+            
+            mutation_log_ptr mlog = new mutation_log_shared(
+                path,
+                4,
+                force_flush
+                );
+
+            auto err = mlog->open(nullptr, nullptr);
+            EXPECT_EQ(err, ERR_OK);
+            mlog->on_partition_reset(gd, 1);
+            logs[i] = mlog;
+        }
+    }
+    else
+    {
+        for (int i = 0; i < log_count; i++)
+        {
+            std::stringstream ss;
+            ss << "temp." << i;
+            auto path = ss.str();
+
+            mutation_log_ptr mlog = new mutation_log_shared(
+                path,
+                4,
+                force_flush
+                );
+            mlog->on_partition_reset(gd, 1);
+            logs[i] = mlog;
+        }
+    }
+
+    if (log_count < concurrency)
+    {
+        dassert (1 == log_count, "");
+
+        for (int i = 1; i < concurrency; i++)
+            logs[i] = logs[0];
+    }
+    
+    std::atomic<uint64_t> io_count(0);
+    std::atomic<uint64_t> cb_flying_count(0);
+    volatile bool exit = false;
+    std::function<void(int)> cb;
+    std::vector<uint64_t> offsets;
+    offsets.resize(concurrency);
+
+    cb = [&](int index)
+    {
+        if (!exit)
+        {
+            cb_flying_count++;
+            if (is_write)
+            {
+                io_count++;
+                auto mu = generate_mutation(block_size);
+                logs[index]->append(mu, LPC_AIO_IMMEDIATE_CALLBACK, nullptr, 
+                    [idx = index, &cb, &cb_flying_count, mu2 = mu](::dsn::error_code code, size_t sz)
+                    {
+                        if (ERR_OK == code)
+                            cb(idx);
+                        cb_flying_count--;
+                    }, 
+                    0);
+            }
+            else
+            {
+                if (index == 0 || logs[index] != logs[0])
+                {
+                    logs[index]->open(
+                        [&](mutation_ptr& lmu)->bool
+                    {
+                        EXPECT_TRUE(lmu->data.header.decree == 0xdeadbeef);
+                        return true;
+                    }, nullptr
+                    );
+
+                    io_count += logs[index]->size();
+                }
+                cb_flying_count--;
+            }
+        }
+    };
+
+    // start
+    auto tic = std::chrono::steady_clock::now();
+    for (int i = 0; i < concurrency; i++)
+    {
+        offsets[i] = 0;
+        cb(i);
+    }
+
+    if (is_write)
+    {
+        // run for seconds
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+    
+    auto ioc = io_count.load();
+    auto bytes = ioc * block_size;
+    if (!is_write) bytes = ioc;
+    auto toc = std::chrono::steady_clock::now();
+
+    if (is_write)
+    {
+        std::cout << "(W)"
+            << "block_size = " << block_size
+            << ", shared = " << shared
+            << ", concurrency = " << concurrency
+            << ", iops = " << (double)ioc / (double)std::chrono::duration_cast<std::chrono::microseconds>(toc - tic).count() * 1000000.0 << " #/s"
+            << ", throughput = " << (double)bytes / std::chrono::duration_cast<std::chrono::microseconds>(toc - tic).count() << " mB/s"
+            << ", avg_latency = " << (double)std::chrono::duration_cast<std::chrono::microseconds>(toc - tic).count() / (double)(ioc / concurrency) << " us"
+            << ", flush = " << force_flush
+            << std::endl;
+    }
+    else
+    {
+        std::cout << "(R)"
+            << "block_size = " << block_size
+            << ", shared = " << shared
+            << ", concurrency = " << concurrency
+            << ", throughput = " << (double)bytes / std::chrono::duration_cast<std::chrono::microseconds>(toc - tic).count() << " mB/s"
+            << std::endl;
+    }
+
+    // safe exit
+    exit = true;
+
+    while (cb_flying_count.load() > 0)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    for (int i = 0; i < log_count; i++)
+    {
+        logs[i]->close();
+    }
+}
+
+TEST(perf_replication, mutation_log)
+{
+    for (auto force_flush : { false, true })
+        for (auto is_write : { true, false })
+            for (auto blk_size_bytes : { 100, 256, 1024, 4 * 1024})
+                    for (auto concurrency : { 1, 4, 128 })
+                        for (auto shared : { false, true})
+                            mutation_log_testcase(blk_size_bytes, concurrency, is_write, force_flush, shared);
+}
+
