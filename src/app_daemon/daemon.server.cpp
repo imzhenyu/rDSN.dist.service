@@ -39,9 +39,11 @@
 # include <dsn/cpp/utils.h>
 # include <dsn/tool_api.h>
 # include <dsn/utility/module_init.cpp.h>
+# include <fstream>
 
 # if defined(__linux__)
 # include <sys/prctl.h>
+# include <sys/wait.h>
 # endif
 
 using namespace ::dsn::replication;
@@ -667,8 +669,7 @@ namespace dsn
 
                     utils::filesystem::create_directory(app->working_dir);
                 }
-
-                std::stringstream ss;
+                                
                 std::string config_file = pkg->config_file;
 
                 // developers overwrite the default config file using RDSN_TARGET_CONFIG env var
@@ -686,30 +687,23 @@ namespace dsn
                         return;
                     }
                 }
-                
-# ifdef _WIN32
-                ss << "dsn.svchost.exe ";
-# else
-                ss << "cd " << app->working_dir 
-                   << " && export LD_LIBRARY_PATH=" << app->working_dir 
-                   << ":$LD_LIBRARY_PATH && dsn.svchost ";
-# endif
-                ss << config_file << " -cargs port=" << port << ";";
-                for (auto& kv : app->info.envs)
-                {
-                    ss << kv.first << "=" << kv.second << ";";
-                }
-                
-                std::string command = ss.str();
-
+              
                 app->working_port = port;
 
-                dinfo("try start app %s with command %s at working dir %s ...",
+# ifdef _WIN32
+                std::stringstream ss; 
+                ss << "dsn.svchost.exe " << config_file << " -cargs port=" << port;
+                for (auto& kv : app->info.envs)
+                {
+                    ss << ";" << kv.first << " = " << kv.second;
+                }
+                std::string command = ss.str();
+                dwarn("try start app %s with command %s at working dir %s ...",
                     app->info.app_type.c_str(),
                     command.c_str(),
                     app->working_dir.c_str()
-                    );
-# ifdef _WIN32
+                );
+
                 STARTUPINFOA si;
                 PROCESS_INFORMATION pi;
 
@@ -753,9 +747,56 @@ namespace dsn
                 // child process
                 else if (child == 0)
                 {
+                    // set up envs
+                    chdir(app->working_dir.c_str());
+
+                    char dest[PATH_MAX];
+                    if (readlink("/proc/self/exe", dest, PATH_MAX) == -1)
+                    {
+                        dassert(false, "read /proc/self/exe failed");
+                    }
+
+                    std::string host_path = dest;
+                    std::string host_name = utils::filesystem::get_file_name(host_path);
+                    dassert(host_name == "dsn.svchost", 
+                        "invalid daemon exe name %s vs dsn.svchost", 
+                        host_name.c_str()
+                    );
+                    host_path = host_path.substr(0, host_path.length() - host_name.length() - 1);
+                    
+                    std::string libs_new = 
+                        pkg->package_dir + ":" + 
+                        host_path + ":" + 
+                        getenv("LD_LIBRARY_PATH")
+                        ;
+
+                    setenv("LD_LIBRARY_PATH", libs_new.c_str(), 1);
+
+                    std::stringstream ss;
+                    ss << "port=" << port;
+                    for (auto& kv : app->info.envs)
+                    {
+                        ss << ";" << kv.first << " = " << kv.second;
+                    }
+                    std::string command = ss.str();
+
+                    dwarn("try start app %s with command %s %s -cargs %s at working dir %s ...",
+                        app->info.app_type.c_str(),
+                        dest,
+                        config_file.c_str(),
+                        command.c_str(),
+                        app->working_dir.c_str()
+                    );
+
                     // run command
-                    char* const argv[] = { (char*)"sh", (char*)"-c", (char*)command.c_str(), nullptr };
-                    execve("/bin/sh", argv, environ);
+                    char* const argv[] = { 
+                        (char*)"dsn.svchost", 
+                        (char*)config_file.c_str(), 
+                        (char*)"-cargs",
+                        (char*)command.c_str(), 
+                        nullptr 
+                    };
+                    execve(dest, argv, environ);
                     exit(0);
                 }
                 
@@ -763,7 +804,7 @@ namespace dsn
                 // wait for a while
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-                // see if the process is still there
+                // see if the process is still there       
                 if (getpgid(child) >= 0)
                 {
                     app->process_handle = (dsn_handle_t)(uint64_t)child;
@@ -821,6 +862,9 @@ namespace dsn
 # else
                 int child = (int)(uint64_t)app->process_handle;
                 kill(child, SIGKILL);
+
+                int return_status;
+                waitpid(child, &return_status, 0);
                 app->process_handle = nullptr;
 # endif
                 app->exited = true;
