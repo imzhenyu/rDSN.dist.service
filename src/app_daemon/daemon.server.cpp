@@ -814,6 +814,8 @@ namespace dsn
                 // not exsit, try again
                 else
                 {
+                    int return_status;
+                    waitpid(child, &return_status, 0);
                     continue;
                 }
 # endif
@@ -911,8 +913,9 @@ namespace dsn
 # else
                     int child = (int)(uint64_t)app->process_handle;
                     
-                    // see if the process is not there
-                    if (getpgid(child) < 0)
+                    // see if the process exits
+                    int return_status;
+                    if (child == waitpid(child, &return_status, WNOHANG))
                     {
                         app->exited = true;
                         app->process_handle = nullptr;
@@ -935,8 +938,32 @@ namespace dsn
             for (auto& app : delete_list)
             {
                 auto cap_app = app;
-                kill_app(std::move(cap_app));
-                update_configuration_on_meta_server(config_type::CT_REMOVE, std::move(app));
+                std::shared_ptr<package_internal> pkg = nullptr;
+
+                if (app->info.is_stateful)
+                {    
+                    _lock.lock_read();
+                    {
+                        auto it = _apps.find(app->info.app_type);
+                        if (it != _apps.end())
+                        {
+                            pkg = it->second;
+                        }
+                    }
+                    _lock.unlock_read();
+                }
+
+                if (pkg != nullptr)
+                {
+                    // restart
+                    app->exited = false;
+                    start_app(std::move(cap_app), std::move(pkg));
+                }
+                else
+                {                    
+                    kill_app(std::move(cap_app));
+                    update_configuration_on_meta_server(config_type::CT_REMOVE, std::move(app));
+                }
             }
         }
         
