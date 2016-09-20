@@ -672,10 +672,12 @@ namespace dsn
                                 
                 std::string config_file = pkg->config_file;
 
-                // developers overwrite the default config file using RDSN_TARGET_CONFIG env var
-                if (app->info.envs.find("RDSN_TARGET_CONFIG") != app->info.envs.end())
+                // developers parameter the default config file using RDSN_TARGET_CONFIG env var
+                auto envs = app->info.envs;
+                auto it = envs.find("RDSN_TARGET_CONFIG");
+                if (it != envs.end())
                 {
-                    config_file = utils::filesystem::path_combine(pkg->package_dir, app->info.envs["RDSN_TARGET_CONFIG"]);
+                    config_file = utils::filesystem::path_combine(pkg->package_dir, it->second);
                     if (!utils::filesystem::file_exists(config_file))
                     {
                         derror("package %s does not contain config file '%s' in it",
@@ -686,17 +688,33 @@ namespace dsn
                         kill_app(std::move(app));
                         return;
                     }
+                    envs.erase(it);
                 }
-              
+
+                // developers overwrite the config file using RDSN_OVERWRITES 
+                std::string overwrites = "";
+                it = envs.find("RDSN_OVERWRITES");
+                if (it != envs.end())
+                {
+                    overwrites = std::move(it->second);
+                    envs.erase(it);
+                }
+                              
                 app->working_port = port;
 
 # ifdef _WIN32
                 std::stringstream ss; 
                 ss << "dsn.svchost.exe " << config_file << " -cargs port=" << port;
-                for (auto& kv : app->info.envs)
+                for (auto& kv : envs)
                 {
-                    ss << ";" << kv.first << " = " << kv.second;
+                    ss << ";" << kv.first << "=" << kv.second;
                 }
+
+                if (overwrites.length() > 0)
+                {
+                    ss << " -overwrite " << overwrites;
+                }
+
                 std::string command = ss.str();
                 dwarn("try start app %s with command %s at working dir %s ...",
                     app->info.app_type.c_str(),
@@ -774,29 +792,46 @@ namespace dsn
 
                     std::stringstream ss;
                     ss << "port=" << port;
-                    for (auto& kv : app->info.envs)
+                    for (auto& kv : envs)
                     {
-                        ss << ";" << kv.first << " = " << kv.second;
+                        ss << ";" << kv.first << "=" << kv.second;
                     }
-                    std::string command = ss.str();
+                    std::string cargs = ss.str();
 
-                    dwarn("try start app %s with command %s %s -cargs %s at working dir %s ...",
+                    dwarn("try start app %s with command %s %s -cargs %s -overwrite %s at working dir %s ...",
                         app->info.app_type.c_str(),
                         dest,
                         config_file.c_str(),
-                        command.c_str(),
+                        cargs.c_str(),
+                        overwrites.c_str(),
                         app->working_dir.c_str()
                     );
 
                     // run command
-                    char* const argv[] = { 
-                        (char*)"dsn.svchost", 
-                        (char*)config_file.c_str(), 
-                        (char*)"-cargs",
-                        (char*)command.c_str(), 
-                        nullptr 
-                    };
-                    execve(dest, argv, environ);
+                    if (overwrites.length() == 0)
+                    {
+                        char* const argv[] = {
+                            (char*)"dsn.svchost",
+                            (char*)config_file.c_str(),
+                            (char*)"-cargs",
+                            (char*)cargs.c_str(),
+                            nullptr
+                        };
+                        execve(dest, argv, environ);
+                    }
+                    else
+                    {
+                        char* const argv[] = {
+                            (char*)"dsn.svchost",
+                            (char*)config_file.c_str(),
+                            (char*)"-cargs",
+                            (char*)cargs.c_str(),
+                            (char*)"-overwrite",
+                            (char*)overwrites.c_str(),
+                            nullptr
+                        };
+                        execve(dest, argv, environ);
+                    }
                     exit(0);
                 }
                 
