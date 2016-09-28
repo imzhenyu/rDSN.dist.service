@@ -37,7 +37,7 @@ TEST(meta, apply_balancer)
 
 dsn::error_code meta_service_test_app::start(int argc, char **argv)
 {
-    uint32_t seed = (uint32_t)dsn_config_get_value_uint64("tools.simulator", "random_seed", 0, "random seed");
+    uint32_t seed = (uint32_t)dsn_config_get_value_uint64("tools.emulator", "random_seed", 0, "random seed");
     if (seed == 0)
     {
         seed = time(0);
