@@ -64,7 +64,14 @@ void config_context::cancel_sync()
 {
     if (config_status::pending_remote_sync == stage)
     {
-        pending_sync_task->cancel(false);
+        bool finished = false;
+        bool cancelled = pending_sync_task->cancel(false, &finished);
+        
+        dassert(cancelled, 
+            "the task must be cancelled, mostly because the following"
+            " config is not set: [threadpool.THREAD_POOL_META_STATE] worker_count = 1"
+        );
+
         pending_sync_task = nullptr;
         pending_sync_request.reset();
     }

@@ -92,7 +92,7 @@ namespace dsn
             _unzip_format_string = dsn_config_get_value_string(
                 "apps.daemon", 
                 "unzip_format_string", 
-                "unzip -qo %s.zip -d %s", 
+                "powershell.exe -nologo -noprofile -command \"& { Add-Type -A 'System.IO.Compression.FileSystem'; [IO.Compression.ZipFile]::ExtractToDirectory('%s.zip', '%s'); }\"",
                 "unzip cmd used as fprintf(fmt-str, src-package-name, dst-dir)"
             );
 # else
@@ -455,8 +455,9 @@ namespace dsn
                         ppackage.reset(new package_internal());
                         ppackage->package_dir = utils::filesystem::path_combine(_working_dir, proposal.info.app_type);
 
-                        // each package is required with a config.ini in it for run as: dsn.svchost config.ini -cargs port=%port%;envs
-                        ppackage->config_file = utils::filesystem::path_combine(ppackage->package_dir, "config.ini");
+                        // each package is required with a config.deploy.ini in it for run as: dsn.svchost config.ini -cargs port=%port%;envs
+                        ppackage->config_file = utils::filesystem::path_combine(ppackage->package_dir,
+                            "config.deploy.ini");
 
                         _apps.emplace(proposal.info.app_type, ppackage);
                     }
@@ -512,6 +513,8 @@ namespace dsn
                     _working_dir.c_str()
                     );
 
+                utils::filesystem::remove_path(files[0]);
+
                 file::copy_remote_files(
                     _package_server,
                     _package_dir_on_package_server,
@@ -522,8 +525,13 @@ namespace dsn
                     this,
                     [this, pkg = std::move(ppackage), capp = std::move(app)](error_code err, size_t sz) mutable
                     {
+                        pkg->downloading = false;
                         if (err == ERR_OK)
                         {
+                            dinfo("download app %s OK ...",
+                                capp->info.app_type.c_str()
+                            );
+
                             // TODO: using zip lib instead
                             char command[1024];
                             snprintf_p(command, sizeof(command), 
@@ -536,10 +544,11 @@ namespace dsn
                             int serr = system(command);
                             if (serr != 0)
                             {
-                                derror("extract package %s with cmd '%s' failed, err = %d",
+                                derror("extract package %s with cmd '%s' failed, err = %d, errno = %d",
                                     pkg->package_dir.c_str(),
                                     command,
-                                    serr
+                                    serr,
+                                    errno
                                 );
 
                                 err = ERR_UNKNOWN;
@@ -558,8 +567,7 @@ namespace dsn
                                     {
                                         ::dsn::service::zauto_write_lock l(_lock);
                                         apps = pkg->apps;
-                                        pkg->resource_ready = true;
-                                        pkg->downloading = false;
+                                        pkg->resource_ready = true;                                        
                                     }
 
                                     for (auto& app : apps)
@@ -631,7 +639,7 @@ namespace dsn
                             app->configuration = proposal.config;
 
                             it->second->apps.erase(it2);
-                            if (it->second->apps.empty())
+                            if (it->second->apps.empty() && !it->second->downloading)
                             {
                                 _apps.erase(proposal.info.app_type);
                             }
@@ -647,6 +655,49 @@ namespace dsn
 
                 update_configuration_on_meta_server(config_type::CT_REMOVE, std::move(app));
             }
+        }
+
+        bool daemon_s_service::app_internal::is_exited()
+        {
+            if (process_handle)
+            {
+
+# ifdef _WIN32
+                return WAIT_OBJECT_0 == ::WaitForSingleObject(process_handle, 0);
+# else
+                int child = (int)(uint64_t)process_handle;
+
+                // see if the process exits
+                int return_status;
+                return child == waitpid(child, &return_status, WNOHANG);
+# endif
+            }
+            else
+                return true;
+        }
+
+        int daemon_s_service::app_internal::close()
+        {
+            int exit_code = 0;
+# ifdef _WIN32
+            if (nullptr != process_handle)
+            {
+                ::GetExitCodeProcess(process_handle, (LPDWORD)&exit_code);
+                ::TerminateProcess(process_handle, 0);
+                ::CloseHandle(process_handle);
+                process_handle = nullptr;
+            }
+# else
+            if (nullptr != process_handle)
+            {
+                int child = (int)(uint64_t)process_handle;
+                kill(child, SIGKILL);
+
+                waitpid(child, &exit_code, 0);
+                process_handle = nullptr;
+            }
+# endif
+            return exit_code;
         }
 
         void daemon_s_service::start_app(std::shared_ptr<app_internal> && app, std::shared_ptr<package_internal>&& pkg)
@@ -699,12 +750,33 @@ namespace dsn
                     overwrites = std::move(it->second);
                     envs.erase(it);
                 }
-                              
+
+                // add deployment path as DSN_DEPLOYMENT_PATH
+# ifdef _WIN32
+                char exe_path[1024];
+                ::GetModuleFileNameA(nullptr, exe_path, 1024);
+# else
+                char exe_path[1024];
+                if (readlink("/proc/self/exe", exe_path, 1024) == -1)
+                {
+                    dassert(false, "read /proc/self/exe failed");
+                }
+# endif
+                std::string host_name = utils::filesystem::get_file_name(exe_path);
+                dassert(host_name.substr(0, strlen("dsn.svchost")) == "dsn.svchost",
+                    "invalid daemon exe name %s vs dsn.svchost",
+                    host_name.c_str()
+                );
+
+                std::string deployment_dir = exe_path;
+                deployment_dir = deployment_dir.substr(0, deployment_dir.length() - host_name.length() - 1);
+                envs["DSN_DEPLOYMENT_PATH"] = deployment_dir;
+
                 app->working_port = port;
 
 # ifdef _WIN32
                 std::stringstream ss; 
-                ss << "dsn.svchost.exe " << config_file << " -cargs port=" << port;
+                ss << exe_path << " " << config_file << " -cargs port=" << port;
                 for (auto& kv : envs)
                 {
                     ss << ";" << kv.first << "=" << kv.second;
@@ -724,10 +796,38 @@ namespace dsn
 
                 STARTUPINFOA si;
                 PROCESS_INFORMATION pi;
+                SECURITY_ATTRIBUTES sa;
+
+                sa.nLength = sizeof(sa);
+                sa.lpSecurityDescriptor = NULL;
+                sa.bInheritHandle = TRUE;
 
                 ZeroMemory(&si, sizeof(si));
                 si.cb = sizeof(si);
                 ZeroMemory(&pi, sizeof(pi));
+
+                si.hStdError = ::CreateFileA(
+                    utils::filesystem::path_combine(app->working_dir, "foo.err").c_str(),
+                    FILE_APPEND_DATA,
+                    FILE_SHARE_WRITE | FILE_SHARE_READ,
+                    &sa,
+                    OPEN_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL,
+                    NULL
+                );
+
+                si.hStdOutput = ::CreateFileA(
+                    utils::filesystem::path_combine(app->working_dir, "foo.out").c_str(),
+                    FILE_APPEND_DATA,
+                    FILE_SHARE_WRITE | FILE_SHARE_READ,
+                    &sa,
+                    OPEN_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL,
+                    NULL
+                );
+
+                si.hStdInput = nullptr;
+                si.dwFlags |= STARTF_USESTDHANDLES;
 
                 if (::CreateProcessA(NULL, (LPSTR)command.c_str(), NULL, NULL, TRUE, CREATE_NEW_CONSOLE, 
                     NULL, // env
@@ -738,53 +838,53 @@ namespace dsn
                         // dassert(false, "cannot attach process to job, err = %d", ::GetLastError());
                     }
 
-                    CloseHandle(pi.hThread);                    
-                }
-                else
-                {
-                    derror("create process failed, err = %d", ::GetLastError());
-                    kill_app(std::move(app));
-                    return;
-                }
-
-                // sleep a while to see whether the port is usable
-                if (WAIT_TIMEOUT == ::WaitForSingleObject(pi.hProcess, 50))
-                {
                     app->process_handle = pi.hProcess;
-                    break;
+                    CloseHandle(pi.hThread);  
+                    CloseHandle(si.hStdError);
+                    CloseHandle(si.hStdOutput);
                 }
                 else
                 {
-                    ::CloseHandle(pi.hProcess);
+                    CloseHandle(si.hStdError);
+                    CloseHandle(si.hStdOutput);
+
+                    derror("create process (CreateProcess) failed, err = %d", ::GetLastError());
+                    break;
                 }
 # else
                 int child = fork();
                 if (-1 == child)
+                {
+                    derror("create process (fork) failed, err = %d", errno);
                     break;
+                }
 
                 // child process
                 else if (child == 0)
                 {
+                    // redirect std output and err
+                    int serr = open(
+                        utils::filesystem::path_combine(app->working_dir, "foo.err").c_str(),
+                        O_RDWR | O_CREAT, S_IRUSR | S_IWUSR
+                    );
+
+                    int sout = open(
+                        utils::filesystem::path_combine(app->working_dir, "foo.out").c_str(),
+                        O_RDWR | O_CREAT, S_IRUSR | S_IWUSR
+                    );
+
+                    dup2(sout, 1);
+                    dup2(serr, 2);
+
+                    close(serr);
+                    close(sout);
+
                     // set up envs
                     chdir(app->working_dir.c_str());
-
-                    char dest[PATH_MAX];
-                    if (readlink("/proc/self/exe", dest, PATH_MAX) == -1)
-                    {
-                        dassert(false, "read /proc/self/exe failed");
-                    }
-
-                    std::string host_path = dest;
-                    std::string host_name = utils::filesystem::get_file_name(host_path);
-                    dassert(host_name == "dsn.svchost", 
-                        "invalid daemon exe name %s vs dsn.svchost", 
-                        host_name.c_str()
-                    );
-                    host_path = host_path.substr(0, host_path.length() - host_name.length() - 1);
-                    
+                                        
                     std::string libs_new = 
                         pkg->package_dir + ":" + 
-                        host_path + ":" + 
+                        deployment_dir + ":" + 
                         getenv("LD_LIBRARY_PATH")
                         ;
 
@@ -800,7 +900,7 @@ namespace dsn
 
                     dwarn("try start app %s with command %s %s -cargs %s -overwrite %s at working dir %s ...",
                         app->info.app_type.c_str(),
-                        dest,
+                        exe_path,
                         config_file.c_str(),
                         cargs.c_str(),
                         overwrites.c_str(),
@@ -817,7 +917,7 @@ namespace dsn
                             (char*)cargs.c_str(),
                             nullptr
                         };
-                        execve(dest, argv, environ);
+                        execve(exe_path, argv, environ);
                     }
                     else
                     {
@@ -830,30 +930,27 @@ namespace dsn
                             (char*)overwrites.c_str(),
                             nullptr
                         };
-                        execve(dest, argv, environ);
+                        execve(exe_path, argv, environ);
                     }
                     exit(0);
                 }
-                
-                // daemon
-                // wait for a while
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-                // see if the process is still there       
-                if (getpgid(child) >= 0)
-                {
-                    app->process_handle = (dsn_handle_t)(uint64_t)child;
-                    break;
-                }
-
-                // not exsit, try again
                 else
                 {
-                    int return_status;
-                    waitpid(child, &return_status, 0);
-                    continue;
+                    app->process_handle = (dsn_handle_t)(uint64_t)child;
                 }
 # endif
+
+                // sleep a while to see whether the port is usable
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+                if (!app->is_exited())
+                {
+                    break;
+                }
+                else
+                {
+                    app->close();
+                }
             }
 
             // register to meta server if successful
@@ -883,27 +980,14 @@ namespace dsn
                 if (it != _apps.end())
                 {
                     it->second->apps.erase(app->configuration.pid);
-                    if (it->second->apps.empty())
+                    if (it->second->apps.empty() && !it->second->downloading)
                         _apps.erase(it);
                 }
             }
 
-            if (!app->exited && app->process_handle)
+            if (!app->exited)
             {
-# ifdef _WIN32
-                std::ostringstream pid;
-                std::string command;
-                ::TerminateProcess(app->process_handle, 0);
-                ::CloseHandle(app->process_handle);
-                app->process_handle = nullptr;
-# else
-                int child = (int)(uint64_t)app->process_handle;
-                kill(child, SIGKILL);
-
-                int return_status;
-                waitpid(child, &return_status, 0);
-                app->process_handle = nullptr;
-# endif
+                app->close();
                 app->exited = true;
             }
 
@@ -929,14 +1013,10 @@ namespace dsn
             {
                 if (app->process_handle)
                 {
-# ifdef _WIN32
-                    if (WAIT_OBJECT_0 == ::WaitForSingleObject(app->process_handle, 0))
+                    if (app->is_exited())
                     {
                         app->exited = true;
-                        DWORD exit_code = 0xdeadbeef;
-                        ::GetExitCodeProcess(app->process_handle, &exit_code);
-                        ::CloseHandle(app->process_handle);
-                        app->process_handle = nullptr;
+                        int exit_code = app->close();
 
                         dinfo("app %s exits (code = %x), with working dir = %s, port = %d",
                             app->info.app_type.c_str(),
@@ -945,23 +1025,6 @@ namespace dsn
                             (int)app->working_port
                         );
                     }
-# else
-                    int child = (int)(uint64_t)app->process_handle;
-                    
-                    // see if the process exits
-                    int return_status;
-                    if (child == waitpid(child, &return_status, WNOHANG))
-                    {
-                        app->exited = true;
-                        app->process_handle = nullptr;
-
-                        dinfo("app %s exits, with working dir = %s, port = %d",
-                            app->info.app_type.c_str(),
-                            app->working_dir.c_str(),
-                            (int)app->working_port
-                            );
-                    }
-# endif
                 }
 
                 if (app->exited)

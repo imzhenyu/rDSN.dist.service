@@ -79,6 +79,14 @@ namespace dsn
                     not_exist_on_meta_count = 0;
                     info = proposal.info;
                 }
+
+                ~app_internal()
+                {
+                    close();
+                }
+
+                int close();
+                bool is_exited();
             };
 
             typedef std::unordered_map< ::dsn::gpid, std::shared_ptr<app_internal>> same_package_apps;
@@ -109,7 +117,10 @@ namespace dsn
             uint32_t    _app_port_min; // inclusive
             uint32_t    _app_port_max; // inclusive
             uint32_t    _config_sync_interval_seconds; 
-            std::string _unzip_format_string; // e.g., unzip -qo %s.zip -d %s (src name => dst dir)
+            std::string _unzip_format_string; 
+            // e.g., unzip -qo %s.zip -d %s (src name => dst dir)
+            //       7z x %s.zip -o%s
+            //       powershell.exe -nologo -noprofile -command "& { Add-Type -A 'System.IO.Compression.FileSystem'; [IO.Compression.ZipFile]::ExtractToDirectory('%s.zip', '%s'); }"
             
             task_ptr    _app_check_timer;
             task_ptr    _app_sync_timer;
