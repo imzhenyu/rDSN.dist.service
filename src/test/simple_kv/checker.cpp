@@ -315,8 +315,8 @@ bool test_checker::get_current_config(parti_config& config)
 
     //we should never try to acquire lock when we are in checker. Because we are the only
     //thread that is running.
-    //The app and simulator have lots in common with the OS's userspace and kernel space.
-    //In normal case, "apps" runs in "userspace". You can "trap into kernel(i.e. the simulator)" by the rDSN's
+    //The app and emulator have lots in common with the OS's userspace and kernel space.
+    //In normal case, "apps" runs in "userspace". You can "trap into kernel(i.e. the emulator)" by the rDSN's
     //"enqueue,dequeue and lock..."
 
     //meta->_service->_state->query_configuration_by_gpid(g_default_gpid, c);
