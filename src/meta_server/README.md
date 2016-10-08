@@ -29,18 +29,7 @@ Daemons or replica servers need to specify the meta server address in their conf
 server_list = <meta-server1,meta-server2>
 ```
 
-Clients accessing the services also need to specify the meta server addresses.
-
-```
-[apps.client]
-type = %service_type%.client 
-arguments = dsn://mycluster/<target-service>
-pools = THREAD_POOL_DEFAULT
-
-[uri-resolver.dsn://mycluster]
-factory = partition_resolver_simple
-arguments = <meta-server1,meta-server2>
-``` 
+Clients accessing the services also need to specify the meta server addresses, see [dsn.dist.uri.resolver](https://github.com/Microsoft/rDSN/tree/master/src/plugins/dist.uri.resolver) for more information.
 
 ## Service availability and reliability for meta service itself
 
