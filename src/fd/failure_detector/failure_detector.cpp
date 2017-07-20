@@ -37,6 +37,7 @@
 # include <dsn/dist/failure_detector.h>
 # include <chrono>
 # include <ctime>
+# include <cinttypes>
 
 # ifdef __TITLE__
 # undef __TITLE__
@@ -533,7 +534,7 @@ void failure_detector::send_beacon(::dsn::rpc_address target, uint64_t time)
     beacon.to_addr = target;
 
     dinfo("send ping message, from[%s], to[%s], time[%" PRId64 "]",
-          beacon.from_addr.to_string(), beacon.to_addr.to_string(), time);
+          beacon.from_addr.to_string(), beacon.to_addr.to_string(), beacon.time);
 
     ::dsn::rpc::call(
         target,
